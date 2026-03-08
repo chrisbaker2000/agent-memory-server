@@ -1,5 +1,9 @@
 # CLAUDE.md - Redis Agent Memory Server Project Context
 
+> **This is a fork.** See [FORK.md](FORK.md) for what was changed, why, and how to rebase on upstream.
+> Fork branch: `fork/openclaw-attribution` based on `server/v0.13.2`.
+> Upstream: `https://github.com/redis/agent-memory-server`
+
 ## Redis Version
 This project uses Redis 8, which is the redis:8 docker image.
 Do not use Redis Stack or other earlier versions of Redis.
