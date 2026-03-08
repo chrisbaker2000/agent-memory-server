@@ -270,3 +270,15 @@ class Id(TagFilter):
 
 class DiscreteMemoryExtracted(TagFilter):
     field: str = "discrete_memory_extracted"
+
+
+class SourceUser(TagFilter):
+    field: str = "source_user"
+
+
+class SourceChannel(TagFilter):
+    field: str = "source_channel"
+
+
+class VisibilityFilter(TagFilter):
+    field: str = "visibility"

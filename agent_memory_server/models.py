@@ -20,8 +20,11 @@ from agent_memory_server.filters import (
     MemoryType,
     Namespace,
     SessionId,
+    SourceChannel,
+    SourceUser,
     Topics,
     UserId,
+    VisibilityFilter,
 )
 
 
@@ -312,6 +315,22 @@ class MemoryRecord(BaseModel):
     extraction_strategy_config: dict[str, Any] = Field(
         default_factory=dict,
         description="Configuration for the extraction strategy used",
+    )
+    source_user: str | None = Field(
+        default=None,
+        description="User who created or contributed this memory",
+    )
+    source_channel: str | None = Field(
+        default=None,
+        description="Channel or source where this memory originated",
+    )
+    visibility: str = Field(
+        default="everyone",
+        description="Visibility scope for this memory (e.g. everyone, admin, restricted)",
+    )
+    stale_after: datetime | None = Field(
+        default=None,
+        description="Datetime after which this memory should be considered stale",
     )
 
 
@@ -724,6 +743,18 @@ class SearchRequest(BaseModel):
         default=None,
         description="Optional event date to filter by (for episodic memories)",
     )
+    source_user: SourceUser | None = Field(
+        default=None,
+        description="Optional source user to filter by",
+    )
+    source_channel: SourceChannel | None = Field(
+        default=None,
+        description="Optional source channel to filter by",
+    )
+    visibility: VisibilityFilter | None = Field(
+        default=None,
+        description="Optional visibility scope to filter by",
+    )
     limit: int = Field(
         default=10,
         ge=1,
@@ -800,6 +831,15 @@ class SearchRequest(BaseModel):
 
         if self.event_date is not None:
             filters["event_date"] = self.event_date
+
+        if self.source_user is not None:
+            filters["source_user"] = self.source_user
+
+        if self.source_channel is not None:
+            filters["source_channel"] = self.source_channel
+
+        if self.visibility is not None:
+            filters["visibility"] = self.visibility
 
         return filters
 
@@ -878,6 +918,18 @@ class EditMemoryRecordRequest(BaseModel):
     )
     event_date: datetime | None = Field(
         default=None, description="Updated event date for episodic memories"
+    )
+    source_user: str | None = Field(
+        default=None, description="Updated source user for the memory"
+    )
+    source_channel: str | None = Field(
+        default=None, description="Updated source channel for the memory"
+    )
+    visibility: str | None = Field(
+        default=None, description="Updated visibility scope for the memory"
+    )
+    stale_after: datetime | None = Field(
+        default=None, description="Updated stale-after datetime for the memory"
     )
 
 
