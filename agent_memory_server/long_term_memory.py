@@ -591,25 +591,25 @@ async def merge_memories_with_llm(
     memory_texts = [m.text for m in memories]
 
     # Construct the LLM prompt
-    instruction = """
-    You are a memory merging assistant. Your job is to merge similar or
-    duplicate memories.
+    instruction = """You are a memory merging assistant. Merge the following memories into a single, coherent memory.
 
-    You will be given a list of memories. You will need to merge them into a
-    single, coherent memory.
-    """
+Rules:
+1. Maximum 1000 characters. If the combined content exceeds this, summarize to the essential facts.
+2. Never use 'User' to refer to a person — always use their actual name.
+3. Do not include technical documentation, SQL schemas, or API references.
+4. Keep the merged memory focused on a SINGLE topic. If the input memories cover different subjects, keep only the most specific or personal facts.
+5. Output plain text only. No markdown formatting, no headers like '**Merged Memory:**' or '### Overview'."""
+
     memory_list = "\n".join([f"{i}: {text}" for i, text in enumerate(memory_texts, 1)])
 
-    prompt = f"""
-    {instruction}
+    prompt = f"""{instruction}
 
-    The memories:
-    {memory_list}
+The memories:
+{memory_list}
 
-    The merged memory:
-    """
+Merged memory:"""
 
-    model_name = settings.fast_model
+    model_name = settings.resolved_merge_model
 
     response = await LLMClient.create_chat_completion(
         model=model_name,

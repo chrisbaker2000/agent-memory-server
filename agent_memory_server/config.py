@@ -357,6 +357,16 @@ class Settings(BaseSettings):
     fast_model: str = (
         "gpt-5-mini"  # Faster, smaller model for quick tasks like query optimization
     )
+
+    # Model used for merging similar/duplicate memories during compaction.
+    # Defaults to None, which resolves to generation_model at runtime.
+    merge_model: str | None = None
+
+    @property
+    def resolved_merge_model(self) -> str:
+        """Return the merge model, falling back to the generation model."""
+        return self.merge_model or self.generation_model
+
     port: int = 8000
     mcp_host: str = "0.0.0.0"
     mcp_port: int = 9000
