@@ -282,3 +282,7 @@ class SourceChannel(TagFilter):
 
 class VisibilityFilter(TagFilter):
     field: str = "visibility"
+
+
+class StaleAfter(DateTimeFilter):
+    field: str = "stale_after"

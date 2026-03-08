@@ -24,8 +24,12 @@ from agent_memory_server.filters import (
     MemoryType,
     Namespace,
     SessionId,
+    SourceChannel,
+    SourceUser,
+    StaleAfter,
     Topics,
     UserId,
+    VisibilityFilter,
 )
 from agent_memory_server.models import (
     MemoryRecord,
@@ -74,6 +78,10 @@ class MemoryVectorDatabase(ABC):
         memory_hash: MemoryHash | None = None,
         id: Id | None = None,
         discrete_memory_extracted: DiscreteMemoryExtracted | None = None,
+        source_user: SourceUser | None = None,
+        source_channel: SourceChannel | None = None,
+        visibility: VisibilityFilter | None = None,
+        stale_after: StaleAfter | None = None,
         distance_threshold: float | None = None,
         server_side_recency: bool | None = None,
         recency_params: dict | None = None,
@@ -96,6 +104,10 @@ class MemoryVectorDatabase(ABC):
             memory_hash: Optional memory hash filter
             id: Optional memory ID filter
             discrete_memory_extracted: Optional discrete memory extracted filter
+            source_user: Optional source user filter
+            source_channel: Optional source channel filter
+            visibility: Optional visibility scope filter
+            stale_after: Optional stale-after timestamp filter
             distance_threshold: Optional similarity threshold
             server_side_recency: Whether to use server-side recency scoring
             recency_params: Parameters for recency scoring
@@ -165,6 +177,10 @@ class MemoryVectorDatabase(ABC):
         memory_hash: MemoryHash | None = None,
         id: Id | None = None,
         discrete_memory_extracted: DiscreteMemoryExtracted | None = None,
+        source_user: SourceUser | None = None,
+        source_channel: SourceChannel | None = None,
+        visibility: VisibilityFilter | None = None,
+        stale_after: StaleAfter | None = None,
         limit: int = 10,
         offset: int = 0,
     ) -> MemoryRecordResults:
@@ -187,6 +203,10 @@ class MemoryVectorDatabase(ABC):
             memory_hash: Optional memory hash filter
             id: Optional memory ID filter
             discrete_memory_extracted: Optional discrete memory extracted filter
+            source_user: Optional source user filter
+            source_channel: Optional source channel filter
+            visibility: Optional visibility scope filter
+            stale_after: Optional stale-after timestamp filter
             limit: Maximum number of results
             offset: Offset for pagination
 
@@ -296,6 +316,10 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         "persisted_at",
         "extracted_from",
         "event_date",
+        "source_user",
+        "source_channel",
+        "visibility",
+        "stale_after",
     ]
 
     def __init__(self, index: AsyncSearchIndex, embeddings: Any):
@@ -343,6 +367,9 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
             memory.persisted_at.timestamp() if memory.persisted_at else None
         )
         event_date_val = memory.event_date.timestamp() if memory.event_date else None
+        stale_after_val = (
+            memory.stale_after.timestamp() if memory.stale_after else None
+        )
 
         pinned_int = 1 if getattr(memory, "pinned", False) else 0
         access_count_int = int(getattr(memory, "access_count", 0) or 0)
@@ -374,6 +401,9 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
             "pinned": pinned_int,
             "access_count": access_count_int,
             "extracted_from": extracted_from_str,
+            "source_user": memory.source_user or "",
+            "source_channel": memory.source_channel or "",
+            "visibility": memory.visibility or "everyone",
         }
 
         # Add numeric datetime fields (only if not None, to keep data clean)
@@ -387,6 +417,8 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
             data["persisted_at"] = persisted_at_val
         if event_date_val is not None:
             data["event_date"] = event_date_val
+        if stale_after_val is not None:
+            data["stale_after"] = stale_after_val
 
         return data
 
@@ -425,6 +457,7 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         updated_at = parse_timestamp(fields.get("updated_at"))
         persisted_at = parse_timestamp(fields.get("persisted_at"))
         event_date = parse_timestamp(fields.get("event_date"))
+        stale_after = parse_timestamp(fields.get("stale_after"))
 
         # Provide defaults for required fields
         if not created_at:
@@ -451,6 +484,9 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         session_id = fields.get("session_id") or None
         user_id = fields.get("user_id") or None
         namespace = fields.get("namespace") or None
+        source_user = fields.get("source_user") or None
+        source_channel = fields.get("source_channel") or None
+        visibility = fields.get("visibility") or "everyone"
 
         return MemoryRecordResult(
             text=fields.get("text", ""),
@@ -471,6 +507,10 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
             persisted_at=persisted_at,
             extracted_from=self._parse_list_field(fields.get("extracted_from")),
             event_date=event_date,
+            source_user=source_user,
+            source_channel=source_channel,
+            visibility=visibility,
+            stale_after=stale_after,
             dist=score,
         )
 
@@ -634,6 +674,10 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         memory_hash: MemoryHash | None = None,
         id: Id | None = None,
         discrete_memory_extracted: DiscreteMemoryExtracted | None = None,
+        source_user: SourceUser | None = None,
+        source_channel: SourceChannel | None = None,
+        visibility: VisibilityFilter | None = None,
+        stale_after: StaleAfter | None = None,
         distance_threshold: float | None = None,
         server_side_recency: bool | None = None,
         recency_params: dict | None = None,
@@ -657,6 +701,10 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
             memory_hash=memory_hash,
             id=id,
             discrete_memory_extracted=discrete_memory_extracted,
+            source_user=source_user,
+            source_channel=source_channel,
+            visibility=visibility,
+            stale_after=stale_after,
         )
 
         # If server-side recency is requested, attempt aggregation path first
@@ -786,6 +834,10 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         memory_hash: MemoryHash | None = None,
         id: Id | None = None,
         discrete_memory_extracted: DiscreteMemoryExtracted | None = None,
+        source_user: SourceUser | None = None,
+        source_channel: SourceChannel | None = None,
+        visibility: VisibilityFilter | None = None,
+        stale_after: StaleAfter | None = None,
         limit: int = 10,
         offset: int = 0,
     ) -> MemoryRecordResults:
@@ -811,6 +863,10 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
                 memory_hash=memory_hash,
                 id=id,
                 discrete_memory_extracted=discrete_memory_extracted,
+                source_user=source_user,
+                source_channel=source_channel,
+                visibility=visibility,
+                stale_after=stale_after,
             )
 
             # Create FilterQuery for non-vector search

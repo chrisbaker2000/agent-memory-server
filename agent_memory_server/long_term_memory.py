@@ -27,8 +27,12 @@ from agent_memory_server.filters import (
     MemoryType,
     Namespace,
     SessionId,
+    SourceChannel,
+    SourceUser,
+    StaleAfter,
     Topics,
     UserId,
+    VisibilityFilter,
 )
 from agent_memory_server.llm import LLMClient, optimize_query_for_vector_search
 from agent_memory_server.memory_vector_db_factory import get_memory_vector_db
@@ -1083,6 +1087,10 @@ async def search_long_term_memories(
     memory_type: MemoryType | None = None,
     event_date: EventDate | None = None,
     memory_hash: MemoryHash | None = None,
+    source_user: SourceUser | None = None,
+    source_channel: SourceChannel | None = None,
+    visibility: VisibilityFilter | None = None,
+    stale_after: StaleAfter | None = None,
     server_side_recency: bool | None = None,
     recency_params: dict | None = None,
     limit: int = 10,
@@ -1105,6 +1113,10 @@ async def search_long_term_memories(
         memory_type: Optional memory type filter
         event_date: Optional event date filter
         memory_hash: Optional memory hash filter
+        source_user: Optional source user filter
+        source_channel: Optional source channel filter
+        visibility: Optional visibility scope filter
+        stale_after: Optional stale-after timestamp filter
         limit: Maximum number of results
         offset: Offset for pagination
         optimize_query: Whether to optimize the query for vector search using a fast model (default: False)
@@ -1127,6 +1139,10 @@ async def search_long_term_memories(
             memory_type=memory_type,
             event_date=event_date,
             memory_hash=memory_hash,
+            source_user=source_user,
+            source_channel=source_channel,
+            visibility=visibility,
+            stale_after=stale_after,
             limit=limit,
             offset=offset,
         )
@@ -1163,6 +1179,10 @@ async def search_long_term_memories(
         memory_type=memory_type,
         event_date=event_date,
         memory_hash=memory_hash,
+        source_user=source_user,
+        source_channel=source_channel,
+        visibility=visibility,
+        stale_after=stale_after,
         distance_threshold=distance_threshold,
         server_side_recency=server_side_recency,
         recency_params=recency_params,
@@ -1191,6 +1211,10 @@ async def search_long_term_memories(
                 memory_type=memory_type,
                 event_date=event_date,
                 memory_hash=memory_hash,
+                source_user=source_user,
+                source_channel=source_channel,
+                visibility=visibility,
+                stale_after=stale_after,
                 distance_threshold=distance_threshold,
                 server_side_recency=server_side_recency,
                 recency_params=recency_params,
