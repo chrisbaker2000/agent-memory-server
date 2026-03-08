@@ -13,7 +13,7 @@ name = "agent-memory-server"
 dynamic = ["version"]
 description = "A Memory Server for LLM Agents and Applications"
 readme = "README.md"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.12"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Andrew Brookins", email = "andrew.brookins@redis.com" }]
 dependencies = [
