@@ -1,6 +1,8 @@
 from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 
 from agent_memory_server.long_term_memory import (
+    _parse_stale_after,
     select_ids_for_forgetting,
 )
 from agent_memory_server.models import MemoryRecordResult, MemoryTypeEnum
@@ -18,6 +20,8 @@ def make_result(
     accessed_days_ago: int,
     user_id: str | None = "u1",
     namespace: str | None = "ns1",
+    stale_after: datetime | None = None,
+    pinned: bool = False,
 ):
     now = datetime.now(UTC)
     return MemoryRecordResult(
@@ -37,6 +41,8 @@ def make_result(
         persisted_at=None,
         extracted_from=[],
         event_date=None,
+        stale_after=stale_after,
+        pinned=pinned,
     )
 
 
@@ -185,3 +191,200 @@ def test_select_ids_for_forgetting_respects_pinned_ids():
     # We must keep m1 regardless of budget; so m2/m3 compete for deletion, m3 is older and should be deleted
     assert "m1" not in to_delete
     assert "m3" in to_delete
+
+
+# ---------------------------------------------------------------------------
+# _parse_stale_after helper
+# ---------------------------------------------------------------------------
+
+
+def test_parse_stale_after_none():
+    assert _parse_stale_after(None) is None
+
+
+def test_parse_stale_after_datetime_aware():
+    dt = datetime(2026, 6, 1, tzinfo=UTC)
+    assert _parse_stale_after(dt) == dt
+
+
+def test_parse_stale_after_datetime_naive():
+    dt = datetime(2026, 6, 1)
+    result = _parse_stale_after(dt)
+    assert result is not None
+    assert result.tzinfo is UTC
+    assert result.year == 2026
+
+
+def test_parse_stale_after_timestamp():
+    ts = datetime(2026, 6, 1, tzinfo=UTC).timestamp()
+    result = _parse_stale_after(ts)
+    assert result is not None
+    assert abs((result - datetime(2026, 6, 1, tzinfo=UTC)).total_seconds()) < 1
+
+
+def test_parse_stale_after_iso_string():
+    iso = "2026-06-01T00:00:00+00:00"
+    result = _parse_stale_after(iso)
+    assert result is not None
+    assert result == datetime(2026, 6, 1, tzinfo=UTC)
+
+
+def test_parse_stale_after_iso_string_naive():
+    iso = "2026-06-01T00:00:00"
+    result = _parse_stale_after(iso)
+    assert result is not None
+    assert result.tzinfo is UTC
+
+
+def test_parse_stale_after_invalid_string():
+    assert _parse_stale_after("not-a-date") is None
+
+
+def test_parse_stale_after_unsupported_type():
+    assert _parse_stale_after([1, 2, 3]) is None
+
+
+# ---------------------------------------------------------------------------
+# stale_after policy in select_ids_for_forgetting
+# ---------------------------------------------------------------------------
+
+NO_TTL_POLICY = {
+    "max_age_days": None,
+    "max_inactive_days": None,
+    "budget": None,
+    "memory_type_allowlist": None,
+}
+
+
+def test_stale_after_deletes_expired_memory():
+    """Memories past their stale_after datetime should be deleted."""
+    now = datetime.now(UTC)
+    stale = make_result(
+        "stale1", "old event", dist=0.3,
+        created_days_ago=5, accessed_days_ago=1,
+        stale_after=now - timedelta(hours=1),
+    )
+    fresh = make_result(
+        "fresh1", "current", dist=0.3,
+        created_days_ago=5, accessed_days_ago=1,
+        stale_after=now + timedelta(days=30),
+    )
+    no_stale = make_result(
+        "none1", "no expiry", dist=0.3,
+        created_days_ago=5, accessed_days_ago=1,
+    )
+
+    to_delete = select_ids_for_forgetting(
+        [stale, fresh, no_stale], policy=NO_TTL_POLICY, now=now, pinned_ids=set()
+    )
+    assert set(to_delete) == {"stale1"}
+
+
+def test_stale_after_respects_pinned_ids():
+    """Pinned memories should never be deleted even if stale_after has passed."""
+    now = datetime.now(UTC)
+    stale_pinned = make_result(
+        "pinned1", "important", dist=0.3,
+        created_days_ago=5, accessed_days_ago=1,
+        stale_after=now - timedelta(days=1),
+    )
+
+    to_delete = select_ids_for_forgetting(
+        [stale_pinned], policy=NO_TTL_POLICY, now=now, pinned_ids={"pinned1"}
+    )
+    assert "pinned1" not in to_delete
+
+
+def test_stale_after_respects_pinned_field():
+    """Memories with pinned=True on the record itself are exempt."""
+    now = datetime.now(UTC)
+    stale_pinned = make_result(
+        "pinned2", "important", dist=0.3,
+        created_days_ago=5, accessed_days_ago=1,
+        stale_after=now - timedelta(days=1),
+        pinned=True,
+    )
+
+    to_delete = select_ids_for_forgetting(
+        [stale_pinned], policy=NO_TTL_POLICY, now=now, pinned_ids=set()
+    )
+    assert "pinned2" not in to_delete
+
+
+def test_stale_after_alongside_ttl():
+    """stale_after is additive — both stale and TTL-expired items are caught."""
+    now = datetime.now(UTC)
+    stale_only = make_result(
+        "stale1", "stale", dist=0.3,
+        created_days_ago=5, accessed_days_ago=1,
+        stale_after=now - timedelta(hours=1),
+    )
+    ttl_only = make_result(
+        "ttl1", "old", dist=0.3,
+        created_days_ago=100, accessed_days_ago=100,
+    )
+    safe = make_result(
+        "safe1", "fine", dist=0.3,
+        created_days_ago=1, accessed_days_ago=1,
+    )
+
+    policy = {
+        "max_age_days": 30,
+        "max_inactive_days": None,
+        "budget": None,
+        "memory_type_allowlist": None,
+    }
+
+    to_delete = select_ids_for_forgetting(
+        [stale_only, ttl_only, safe], policy=policy, now=now, pinned_ids=set()
+    )
+    assert set(to_delete) == {"stale1", "ttl1"}
+
+
+def test_stale_after_disabled_via_config():
+    """When stale_after_cleanup_enabled is False, stale memories are NOT deleted."""
+    now = datetime.now(UTC)
+    stale = make_result(
+        "stale1", "stale", dist=0.3,
+        created_days_ago=5, accessed_days_ago=1,
+        stale_after=now - timedelta(hours=1),
+    )
+
+    with patch(
+        "agent_memory_server.long_term_memory.settings"
+    ) as mock_settings:
+        mock_settings.stale_after_cleanup_enabled = False
+        to_delete = select_ids_for_forgetting(
+            [stale], policy=NO_TTL_POLICY, now=now, pinned_ids=set()
+        )
+    assert "stale1" not in to_delete
+
+
+def test_stale_after_exact_boundary():
+    """When now == stale_after, the memory should be deleted (>= semantics)."""
+    now = datetime.now(UTC)
+    boundary = make_result(
+        "edge1", "edge", dist=0.3,
+        created_days_ago=5, accessed_days_ago=1,
+        stale_after=now,
+    )
+
+    to_delete = select_ids_for_forgetting(
+        [boundary], policy=NO_TTL_POLICY, now=now, pinned_ids=set()
+    )
+    assert "edge1" in to_delete
+
+
+def test_stale_after_future_not_deleted():
+    """Memories with stale_after in the future should NOT be deleted."""
+    now = datetime.now(UTC)
+    future = make_result(
+        "future1", "future", dist=0.3,
+        created_days_ago=5, accessed_days_ago=1,
+        stale_after=now + timedelta(days=7),
+    )
+
+    to_delete = select_ids_for_forgetting(
+        [future], policy=NO_TTL_POLICY, now=now, pinned_ids=set()
+    )
+    assert to_delete == []

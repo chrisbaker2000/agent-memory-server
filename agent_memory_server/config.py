@@ -486,6 +486,9 @@ Optimized query:"""
     forgetting_max_inactive_days: float | None = None
     # Keep only top N most recent (by recency score) when budget is set
     forgetting_budget_keep_top_n: int | None = None
+    # When True, memories whose stale_after datetime has passed are eligible
+    # for deletion during the forgetting cycle (pinned memories are exempt).
+    stale_after_cleanup_enabled: bool = True
 
     # Compaction settings
     compaction_every_minutes: int = 10

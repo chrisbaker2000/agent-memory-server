@@ -2036,6 +2036,30 @@ def _is_numeric(value: Any) -> bool:
     return isinstance(value, numbers.Number)
 
 
+def _parse_stale_after(value: Any) -> datetime | None:
+    """Coerce a stale_after value to a timezone-aware datetime.
+
+    Accepts:
+      - ``datetime`` (returned as-is, promoted to UTC if naive)
+      - ``float`` / ``int`` (UNIX timestamp → UTC datetime)
+      - ``str`` (ISO-8601 → UTC datetime)
+      - ``None`` (pass-through)
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value, tz=UTC)
+    if isinstance(value, str):
+        try:
+            dt = datetime.fromisoformat(value)
+            return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+        except ValueError:
+            return None
+    return None
+
+
 def select_ids_for_forgetting(
     results: Iterable[MemoryRecordResult],
     *,
@@ -2043,7 +2067,7 @@ def select_ids_for_forgetting(
     now: datetime,
     pinned_ids: set[str] | None = None,
 ) -> list[str]:
-    """Select IDs for deletion based on TTL, inactivity and budget policies.
+    """Select IDs for deletion based on TTL, inactivity, stale_after, and budget policies.
 
     Policy keys:
       - max_age_days: float | None
@@ -2061,6 +2085,8 @@ def select_ids_for_forgetting(
     if allowlist is not None and not isinstance(allowlist, set):
         allowlist = set(allowlist)
 
+    stale_cleanup = settings.stale_after_cleanup_enabled
+
     to_delete: set[str] = set()
     eligible_for_budget: list[MemoryRecordResult] = []
 
@@ -2077,6 +2103,13 @@ def select_ids_for_forgetting(
         if allowlist is not None and mem_type_value not in allowlist:
             # Not eligible for deletion under current policy
             continue
+
+        # stale_after policy: delete memories past their stale_after datetime
+        if stale_cleanup:
+            stale_dt = _parse_stale_after(getattr(mem, "stale_after", None))
+            if stale_dt is not None and now >= stale_dt:
+                to_delete.add(mem.id)
+                continue
 
         age_days = _days_between(now, mem.created_at)
         inactive_days = _days_between(now, mem.last_accessed)
