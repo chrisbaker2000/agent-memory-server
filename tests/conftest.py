@@ -719,6 +719,27 @@ class MockMemoryVectorDatabase(MemoryVectorDatabase):
                 )
                 if mem_type_val != memory_type.eq:
                     continue
+            if (
+                source_user
+                and hasattr(source_user, "eq")
+                and source_user.eq
+                and memory.source_user != source_user.eq
+            ):
+                continue
+            if (
+                source_channel
+                and hasattr(source_channel, "eq")
+                and source_channel.eq
+                and memory.source_channel != source_channel.eq
+            ):
+                continue
+            if (
+                visibility
+                and hasattr(visibility, "eq")
+                and visibility.eq
+                and memory.visibility != visibility.eq
+            ):
+                continue
 
             result = MemoryRecordResult(
                 id=memory.id,
