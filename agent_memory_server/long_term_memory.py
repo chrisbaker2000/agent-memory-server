@@ -668,7 +668,7 @@ async def merge_memories_with_llm(
     )
 
     # visibility: most restrictive wins (higher rank = more restrictive)
-    _VISIBILITY_RANK = {
+    visibility_rank = {
         "everyone": 0,
         "family": 1,
         "restricted": 2,
@@ -677,7 +677,7 @@ async def merge_memories_with_llm(
         "admin": 5,
     }
     visibility_values = [getattr(m, "visibility", "everyone") for m in memories]
-    merged_visibility = max(visibility_values, key=lambda v: _VISIBILITY_RANK.get(v, 0))
+    merged_visibility = max(visibility_values, key=lambda v: visibility_rank.get(v, 0))
 
     # stale_after: earliest (most conservative) non-None datetime
     stale_after_values = [
@@ -1573,21 +1573,14 @@ async def deduplicate_by_semantic_search(
     user_id_filter = None
     session_id_filter = None
 
-    # TODO: Refactor to avoid inline imports (fix circular imports)
     if namespace or memory.namespace:
-        from agent_memory_server.filters import Namespace
-
         namespace_filter = Namespace(eq=namespace or memory.namespace)
     if user_id or memory.user_id:
-        from agent_memory_server.filters import UserId
-
         user_id_filter = UserId(eq=user_id or memory.user_id)
     # Only filter by session_id if explicitly provided — do NOT fall back to
     # memory.session_id.  Semantic dedup must search across sessions so that
     # compaction can merge identical memories created in different sessions.
     if session_id:
-        from agent_memory_server.filters import SessionId
-
         session_id_filter = SessionId(eq=session_id)
 
     # Use the memory vector database for semantic search
@@ -1608,7 +1601,7 @@ async def deduplicate_by_semantic_search(
 
     if vector_search_result and len(vector_search_result) > 0:
         # Found semantically similar memories
-        similar_memory_ids = [memory.id for memory in vector_search_result]
+        similar_memory_ids = [m.id for m in vector_search_result]
 
         # Merge the memories
         merged_memory = await merge_memories_with_llm(
