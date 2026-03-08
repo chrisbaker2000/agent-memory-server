@@ -15,6 +15,7 @@ from ulid import ULID
 from agent_memory_server.config import settings
 from agent_memory_server.dependencies import get_background_tasks
 from agent_memory_server.extraction import (
+    _resolve_parent_attribution,
     extract_memories_with_strategy,
     handle_extraction,
 )
@@ -211,6 +212,9 @@ async def schedule_trailing_extraction(
     namespace: str | None,
     user_id: str | None,
     redis: Redis,
+    source_user: str | None = None,
+    source_channel: str | None = None,
+    visibility: str | None = None,
 ) -> None:
     """
     Schedule a trailing-edge debounced extraction.
@@ -226,6 +230,9 @@ async def schedule_trailing_extraction(
         namespace: Optional namespace
         user_id: Optional user ID
         redis: Redis client
+        source_user: Attribution source user to propagate to extracted memories
+        source_channel: Attribution source channel to propagate to extracted memories
+        visibility: Visibility scope to propagate to extracted memories
     """
     from datetime import timedelta
 
@@ -265,6 +272,9 @@ async def schedule_trailing_extraction(
                     namespace=namespace,
                     user_id=user_id,
                     scheduled_timestamp=extraction_timestamp,
+                    source_user=source_user,
+                    source_channel=source_channel,
+                    visibility=visibility,
                 )
                 logger.debug(f"Docket task scheduled with key {task_key}")
         except Exception as e:
@@ -282,6 +292,9 @@ async def schedule_trailing_extraction(
                     namespace=namespace,
                     user_id=user_id,
                     scheduled_timestamp=extraction_timestamp,
+                    source_user=source_user,
+                    source_channel=source_channel,
+                    visibility=visibility,
                 )
             finally:
                 # Remove task from tracking set when done
@@ -301,6 +314,9 @@ async def run_delayed_extraction(
     namespace: str | None = None,
     user_id: str | None = None,
     scheduled_timestamp: str | None = None,
+    source_user: str | None = None,
+    source_channel: str | None = None,
+    visibility: str | None = None,
 ) -> int:
     """
     Run the delayed extraction if this task is still valid.
@@ -314,6 +330,9 @@ async def run_delayed_extraction(
         namespace: Optional namespace
         user_id: Optional user ID
         scheduled_timestamp: The timestamp when this extraction was scheduled
+        source_user: Attribution source user to propagate to extracted memories
+        source_channel: Attribution source channel to propagate to extracted memories
+        visibility: Visibility scope to propagate to extracted memories
 
     Returns:
         Number of memories extracted, or 0 if skipped
@@ -377,6 +396,9 @@ async def run_delayed_extraction(
             session_id=session_id,
             namespace=namespace,
             user_id=user_id,
+            source_user=source_user,
+            source_channel=source_channel,
+            visibility=visibility,
         )
 
         # Mark all messages as extracted
@@ -419,6 +441,9 @@ async def extract_memories_from_session_thread(
     session_id: str,
     namespace: str | None = None,
     user_id: str | None = None,
+    source_user: str | None = None,
+    source_channel: str | None = None,
+    visibility: str | None = None,
 ) -> list[MemoryRecord]:
     """
     Extract memories from the entire conversation thread in working memory.
@@ -430,6 +455,9 @@ async def extract_memories_from_session_thread(
         session_id: The session ID to extract memories from
         namespace: Optional namespace for the memories
         user_id: Optional user ID for the memories
+        source_user: Attribution source user to set on extracted memories
+        source_channel: Attribution source channel to set on extracted memories
+        visibility: Visibility scope to set on extracted memories (default: "everyone")
 
     Returns:
         List of extracted memory records with proper contextual grounding
@@ -477,7 +505,8 @@ async def extract_memories_from_session_thread(
             f"Extracted {len(memories_data)} memories from session thread {session_id}"
         )
 
-        # Convert to MemoryRecord objects
+        # Convert to MemoryRecord objects with attribution
+        resolved_visibility = visibility if visibility is not None else "everyone"
         extracted_memories = []
         for memory_data in memories_data:
             memory = MemoryRecord(
@@ -490,6 +519,9 @@ async def extract_memories_from_session_thread(
                 namespace=namespace,
                 user_id=user_id,
                 discrete_memory_extracted="t",  # Mark as extracted
+                source_user=source_user,
+                source_channel=source_channel,
+                visibility=resolved_visibility,
             )
             extracted_memories.append(memory)
 
@@ -645,9 +677,7 @@ async def merge_memories_with_llm(
         "admin": 5,
     }
     visibility_values = [getattr(m, "visibility", "everyone") for m in memories]
-    merged_visibility = max(
-        visibility_values, key=lambda v: _VISIBILITY_RANK.get(v, 0)
-    )
+    merged_visibility = max(visibility_values, key=lambda v: _VISIBILITY_RANK.get(v, 0))
 
     # stale_after: earliest (most conservative) non-None datetime
     stale_after_values = [
@@ -1646,6 +1676,18 @@ async def promote_working_memory_to_long_term(
     promoted_count = 0
     updated_memories = []
 
+    # Derive session-level attribution from existing working memory records.
+    # This propagates attribution context to child memories extracted from
+    # conversation messages in this session.
+    wm_memory_records = [
+        m for m in current_working_memory.memories if isinstance(m, MemoryRecord)
+    ]
+    session_source_user, session_source_channel, session_visibility = (
+        _resolve_parent_attribution(wm_memory_records)
+        if wm_memory_records
+        else (None, None, "everyone")
+    )
+
     # Thread-aware discrete memory extraction with trailing-edge debouncing
     # Instead of extracting immediately, we schedule extraction to run after
     # a period of inactivity. Each new message resets the timer.
@@ -1665,6 +1707,9 @@ async def promote_working_memory_to_long_term(
                     namespace=namespace,
                     user_id=user_id,
                     redis=redis,
+                    source_user=session_source_user,
+                    source_channel=session_source_channel,
+                    visibility=session_visibility,
                 )
             else:
                 # When running in-process (no worker), run extraction inline
@@ -1682,6 +1727,9 @@ async def promote_working_memory_to_long_term(
                     session_id=session_id,
                     namespace=namespace,
                     user_id=user_id,
+                    source_user=session_source_user,
+                    source_channel=session_source_channel,
+                    visibility=session_visibility,
                 )
                 logger.info(
                     f"Inline extraction completed for session {session_id}: "
@@ -1763,6 +1811,9 @@ async def promote_working_memory_to_long_term(
                     persisted_at=None,
                     created_at=msg.created_at,
                     memory_type=MemoryTypeEnum.MESSAGE,
+                    source_user=session_source_user,
+                    source_channel=session_source_channel,
+                    visibility=session_visibility,
                 )
 
                 # Apply same deduplication logic as structured memories

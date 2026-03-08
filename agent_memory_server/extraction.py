@@ -269,9 +269,74 @@ async def handle_extraction(text: str) -> tuple[list[str], list[str]]:
     return topics, entities
 
 
+def _resolve_parent_attribution(
+    memories: list[MemoryRecord],
+    source_user: str | None = None,
+    source_channel: str | None = None,
+    visibility: str | None = None,
+) -> tuple[str | None, str | None, str]:
+    """
+    Resolve attribution fields from explicit parameters and parent memories.
+
+    Explicit parameters take priority. If not provided, inherits from the first
+    non-None value across parent memories. For visibility, uses the most
+    restrictive value.
+
+    Args:
+        memories: Parent memory records to inherit from
+        source_user: Explicit source_user override
+        source_channel: Explicit source_channel override
+        visibility: Explicit visibility override
+
+    Returns:
+        Tuple of (resolved_source_user, resolved_source_channel, resolved_visibility)
+    """
+    visibility_rank = {
+        "everyone": 0,
+        "family": 1,
+        "restricted": 2,
+        "private": 3,
+        "parents": 4,
+        "admin": 5,
+    }
+
+    # Resolve source_user: explicit param > first non-None parent
+    resolved_user = source_user
+    if resolved_user is None:
+        resolved_user = next(
+            (m.source_user for m in memories if m.source_user is not None),
+            None,
+        )
+
+    # Resolve source_channel: explicit param > first non-None parent
+    resolved_channel = source_channel
+    if resolved_channel is None:
+        resolved_channel = next(
+            (m.source_channel for m in memories if m.source_channel is not None),
+            None,
+        )
+
+    # Resolve visibility: explicit param > most restrictive across parents
+    if visibility is not None:
+        resolved_visibility = visibility
+    else:
+        parent_visibilities = [m.visibility for m in memories]
+        if parent_visibilities:
+            resolved_visibility = max(
+                parent_visibilities, key=lambda v: visibility_rank.get(v, 0)
+            )
+        else:
+            resolved_visibility = "everyone"
+
+    return resolved_user, resolved_channel, resolved_visibility
+
+
 async def extract_memories_with_strategy(
     memories: list[MemoryRecord] | None = None,
     deduplicate: bool = True,
+    source_user: str | None = None,
+    source_channel: str | None = None,
+    visibility: str | None = None,
     timeout: Timeout = Timeout(timedelta(minutes=settings.llm_task_timeout_minutes)),
 ):
     """
@@ -283,6 +348,12 @@ async def extract_memories_with_strategy(
     Args:
         memories: List of memory records to process, or None to search for unprocessed messages
         deduplicate: Whether to deduplicate extracted memories
+        source_user: Attribution source user to propagate to child memories.
+            If None, inherits from parent memory's source_user.
+        source_channel: Attribution source channel to propagate to child memories.
+            If None, inherits from parent memory's source_channel.
+        visibility: Visibility scope to propagate to child memories.
+            If None, uses most restrictive visibility from parent memories.
         timeout: Docket timeout for this task (defaults to llm_task_timeout_minutes from settings)
     """
     # Local imports to avoid circular dependencies:
@@ -356,6 +427,23 @@ async def extract_memories_with_strategy(
         for memory in strategy_memories:
             try:
                 extracted_memories = await strategy.extract_memories(memory.text)
+
+                # Resolve attribution for this parent memory
+                parent_user, parent_channel, parent_visibility = (
+                    _resolve_parent_attribution(
+                        [memory],
+                        source_user=source_user,
+                        source_channel=source_channel,
+                        visibility=visibility,
+                    )
+                )
+
+                # Tag each extracted dict with parent attribution for later use
+                for em in extracted_memories:
+                    em["_source_user"] = parent_user
+                    em["_source_channel"] = parent_channel
+                    em["_visibility"] = parent_visibility
+
                 all_new_memories.extend(extracted_memories)
 
                 # Update the memory to mark it as processed
@@ -390,6 +478,9 @@ async def extract_memories_with_strategy(
                 discrete_memory_extracted="t",
                 extraction_strategy="discrete",  # These are already extracted
                 extraction_strategy_config={},
+                source_user=new_memory.get("_source_user"),
+                source_channel=new_memory.get("_source_channel"),
+                visibility=new_memory.get("_visibility", "everyone"),
             )
             for new_memory in all_new_memories
         ]
