@@ -24,8 +24,11 @@ from agent_memory_server.filters import (
     MemoryType,
     Namespace,
     SessionId,
+    SourceChannel,
+    SourceUser,
     Topics,
     UserId,
+    VisibilityFilter,
 )
 from agent_memory_server.long_term_memory import (
     compact_long_term_memories as core_compact_long_term_memories,
@@ -466,6 +469,9 @@ async def search_long_term_memory(
     last_accessed: LastAccessed | None = None,
     user_id: UserId | None = None,
     memory_type: MemoryType | None = None,
+    source_user: SourceUser | None = None,
+    source_channel: SourceChannel | None = None,
+    visibility: VisibilityFilter | None = None,
     distance_threshold: float | None = None,
     limit: int = 10,
     offset: int = 0,
@@ -562,6 +568,9 @@ async def search_long_term_memory(
         last_accessed: Filter by last access date
         user_id: Filter by user ID
         memory_type: Filter by memory type
+        source_user: Filter by the user who created the memory
+        source_channel: Filter by the channel where the memory originated
+        visibility: Filter by visibility scope (e.g. everyone, admin, restricted)
         distance_threshold: Distance threshold for semantic search
         limit: Maximum number of results
         offset: Offset for pagination
@@ -586,6 +595,9 @@ async def search_long_term_memory(
             last_accessed=last_accessed,
             user_id=user_id,
             memory_type=memory_type,
+            source_user=source_user,
+            source_channel=source_channel,
+            visibility=visibility,
             distance_threshold=distance_threshold,
             limit=limit,
             offset=offset,
@@ -624,6 +636,9 @@ async def memory_prompt(
     last_accessed: LastAccessed | None = None,
     user_id: UserId | None = None,
     memory_type: MemoryType | None = None,
+    source_user: SourceUser | None = None,
+    source_channel: SourceChannel | None = None,
+    visibility: VisibilityFilter | None = None,
     distance_threshold: float | None = None,
     limit: int = 10,
     offset: int = 0,
@@ -712,6 +727,9 @@ async def memory_prompt(
         - created_at: Search for long-term memories matching creation date
         - last_accessed: Search for long-term memories matching last access date
         - user_id: Search for long-term memories matching user ID
+        - source_user: Filter by the user who created the memory
+        - source_channel: Filter by the channel where the memory originated
+        - visibility: Filter by visibility scope (e.g. everyone, admin, restricted)
         - distance_threshold: Distance threshold for semantic search
         - limit: Maximum number of long-term memory results
         - offset: Offset for pagination of long-term memory results
@@ -750,6 +768,9 @@ async def memory_prompt(
         user_id=user_id,
         distance_threshold=distance_threshold,
         memory_type=memory_type,
+        source_user=source_user,
+        source_channel=source_channel,
+        visibility=visibility,
         limit=limit,
         offset=offset,
     )
@@ -1017,6 +1038,10 @@ async def edit_long_term_memory(
     user_id: str | None = None,
     session_id: str | None = None,
     event_date: str | None = None,
+    source_user: str | None = None,
+    source_channel: str | None = None,
+    visibility: str | None = None,
+    stale_after: str | None = None,
 ) -> MemoryRecord:
     """
     Edit an existing long-term memory by its ID.
@@ -1037,6 +1062,10 @@ async def edit_long_term_memory(
         user_id: Updated user ID associated with the memory
         session_id: Updated session ID where the memory originated
         event_date: Updated event date for episodic memories (ISO 8601 format: "2024-01-15T14:30:00Z")
+        source_user: Updated source user who created or contributed this memory
+        source_channel: Updated source channel where this memory originated
+        visibility: Updated visibility scope (e.g. "everyone", "admin", "restricted")
+        stale_after: Updated stale-after datetime (ISO 8601 format: "2024-06-01T00:00:00Z")
 
     Returns:
         The updated memory record
@@ -1112,7 +1141,7 @@ async def edit_long_term_memory(
     )
     ```
     """
-    # Build the update request dictionary, handling event_date parsing
+    # Build the update request dictionary, handling event_date/stale_after parsing
     update_dict = {
         "text": text,
         "topics": topics,
@@ -1123,6 +1152,12 @@ async def edit_long_term_memory(
         "session_id": session_id,
         "event_date": (
             _parse_iso8601_datetime(event_date) if event_date is not None else None
+        ),
+        "source_user": source_user,
+        "source_channel": source_channel,
+        "visibility": visibility,
+        "stale_after": (
+            _parse_iso8601_datetime(stale_after) if stale_after is not None else None
         ),
     }
 
