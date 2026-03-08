@@ -612,6 +612,51 @@ async def merge_memories_with_llm(
     # Get the memory type from the first memory
     memory_type = next((m.memory_type for m in memories if m.memory_type), "semantic")
 
+    # --- Attribution field propagation ---
+    # source_user: all must agree (or be None). Different users = refuse merge.
+    source_users = {
+        getattr(m, "source_user", None)
+        for m in memories
+        if getattr(m, "source_user", None) is not None
+    }
+    if len(source_users) > 1:
+        raise ValueError(
+            f"Cannot merge memories with different source_user values: {source_users}"
+        )
+    merged_source_user = next(iter(source_users), None)
+
+    # source_channel: take first non-None value
+    merged_source_channel = next(
+        (
+            getattr(m, "source_channel", None)
+            for m in memories
+            if getattr(m, "source_channel", None) is not None
+        ),
+        None,
+    )
+
+    # visibility: most restrictive wins (higher rank = more restrictive)
+    _VISIBILITY_RANK = {
+        "everyone": 0,
+        "family": 1,
+        "restricted": 2,
+        "private": 3,
+        "parents": 4,
+        "admin": 5,
+    }
+    visibility_values = [getattr(m, "visibility", "everyone") for m in memories]
+    merged_visibility = max(
+        visibility_values, key=lambda v: _VISIBILITY_RANK.get(v, 0)
+    )
+
+    # stale_after: earliest (most conservative) non-None datetime
+    stale_after_values = [
+        getattr(m, "stale_after", None)
+        for m in memories
+        if getattr(m, "stale_after", None) is not None
+    ]
+    merged_stale_after = min(stale_after_values) if stale_after_values else None
+
     # Create the merged memory
     merged_memory = MemoryRecord(
         text=merged_text.strip(),
@@ -626,6 +671,10 @@ async def merge_memories_with_llm(
         entities=list(all_entities) if all_entities else None,
         memory_type=MemoryTypeEnum(memory_type),
         discrete_memory_extracted="t",
+        source_user=merged_source_user,
+        source_channel=merged_source_channel,
+        visibility=merged_visibility,
+        stale_after=merged_stale_after,
     )
 
     # Generate a new hash for the merged memory
@@ -887,6 +936,10 @@ async def compact_long_term_memories(
                         entities=memory_result.entities or [],
                         memory_type=memory_result.memory_type,  # type: ignore
                         discrete_memory_extracted=memory_result.discrete_memory_extracted,  # type: ignore
+                        source_user=getattr(memory_result, "source_user", None),
+                        source_channel=getattr(memory_result, "source_channel", None),
+                        visibility=getattr(memory_result, "visibility", "everyone"),
+                        stale_after=getattr(memory_result, "stale_after", None),
                     )
 
                     # Add this memory to processed list BEFORE processing to prevent cycles
