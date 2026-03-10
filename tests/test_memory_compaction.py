@@ -67,6 +67,7 @@ async def test_merge_memories_with_llm():
     # Create two example memories
     t0 = int(time.time()) - 100
     t1 = int(time.time())
+    # Use controlled vocabulary topics — enforce_topics() filters out unknown terms
     memories = [
         MemoryRecord(
             id="1",
@@ -76,8 +77,8 @@ async def test_merge_memories_with_llm():
             namespace="n",
             created_at=datetime.fromtimestamp(t0, UTC),
             last_accessed=datetime.fromtimestamp(t0, UTC),
-            topics=["a"],
-            entities=["x"],
+            topics=["family"],
+            entities=["Chris"],
             memory_type=MemoryTypeEnum.SEMANTIC,
         ),
         MemoryRecord(
@@ -88,8 +89,8 @@ async def test_merge_memories_with_llm():
             namespace="n",
             created_at=datetime.fromtimestamp(t0 - 50, UTC),
             last_accessed=datetime.fromtimestamp(t1, UTC),
-            topics=["b"],
-            entities=["y"],
+            topics=["health"],
+            entities=["Lindsey"],
             memory_type=MemoryTypeEnum.SEMANTIC,
         ),
     ]
@@ -103,8 +104,8 @@ async def test_merge_memories_with_llm():
         assert merged.text == "Merged content"
         assert merged.created_at == datetime.fromtimestamp(t0 - 50, UTC)  # Earliest
         assert merged.last_accessed == datetime.fromtimestamp(t1, UTC)  # Latest
-        assert set(merged.topics) == {"a", "b"}
-        assert set(merged.entities) == {"x", "y"}
+        assert set(merged.topics) == {"family", "health"}
+        assert set(merged.entities) == {"Chris", "Lindsey"}
         assert merged.memory_hash is not None
 
 

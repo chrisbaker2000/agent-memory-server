@@ -251,7 +251,8 @@ class TestLongTermMemory:
             # Set up proper async mocks
             mock_redis = AsyncMock()
             mock_get_redis.return_value = mock_redis
-            mock_extract.return_value = (["topic1", "topic2"], ["entity1", "entity2"])
+            # Use controlled vocabulary topics — enforce_topics() filters unknowns
+            mock_extract.return_value = (["family", "health"], ["Chris Baker", "Lindsey Baker"])
 
             # Create a proper MemoryRecord
             memory = MemoryRecord(
@@ -275,8 +276,8 @@ class TestLongTermMemory:
 
             # Check the mapping - must use pipe separator to match langchain-redis
             mapping = kwargs["mapping"]
-            assert mapping["topics"] == "topic1|topic2"
-            assert mapping["entities"] == "entity1|entity2"
+            assert mapping["topics"] == "family|health"
+            assert mapping["entities"] == "Chris Baker|Lindsey Baker"
 
     @pytest.mark.asyncio
     async def test_count_long_term_memories(self, mock_async_redis_client):
@@ -374,12 +375,13 @@ class TestLongTermMemory:
 
         from agent_memory_server.llm import ChatCompletionResponse
 
+        # Use controlled vocabulary topics — enforce_topics() filters unknown terms
         memories = [
             MemoryRecord(
                 id="test-id-1",
-                text="User likes coffee",
-                topics=["coffee", "preferences"],
-                entities=["user"],
+                text="Chris likes coffee",
+                topics=["food", "family"],
+                entities=["Chris Baker"],
                 created_at=datetime.fromtimestamp(1000, UTC),
                 last_accessed=datetime.fromtimestamp(1500, UTC),
                 namespace="test",
@@ -390,9 +392,9 @@ class TestLongTermMemory:
             ),
             MemoryRecord(
                 id="test-id-2",
-                text="User enjoys drinking coffee in the morning",
-                topics=["coffee", "morning"],
-                entities=["user"],
+                text="Chris enjoys drinking coffee in the morning",
+                topics=["food", "health"],
+                entities=["Chris Baker"],
                 created_at=datetime.fromtimestamp(1200, UTC),
                 last_accessed=datetime.fromtimestamp(1600, UTC),
                 namespace="test",
@@ -405,7 +407,7 @@ class TestLongTermMemory:
 
         # Mock LLMClient.create_chat_completion
         mock_response = ChatCompletionResponse(
-            content="User enjoys drinking coffee, especially in the morning",
+            content="Chris enjoys drinking coffee, especially in the morning",
             finish_reason="stop",
             prompt_tokens=100,
             completion_tokens=20,
@@ -428,8 +430,8 @@ class TestLongTermMemory:
             assert merged.last_accessed == datetime.fromtimestamp(
                 1600, UTC
             )  # Latest timestamp
-            assert set(merged.topics) == {"coffee", "preferences", "morning"}
-            assert set(merged.entities) == {"user"}
+            assert set(merged.topics) == {"food", "family", "health"}
+            assert set(merged.entities) == {"Chris Baker"}
             assert merged.user_id == "user123"
             assert merged.session_id == "session456"
             assert merged.namespace == "test"

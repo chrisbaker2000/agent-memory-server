@@ -498,7 +498,7 @@ class TestModelAttributionFields:
 class TestAPIAttribution:
     """Tests for attribution fields in REST API create, search, and edit endpoints."""
 
-    async def test_api_create_with_attribution_fields(self, client):
+    async def test_api_create_with_attribution_fields(self, client, mock_memory_vector_db):
         """POST /v1/long-term-memory/ accepts attribution fields on memory records."""
         payload = {
             "memories": [
@@ -518,6 +518,13 @@ class TestAPIAttribution:
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "ok"
+
+        # Verify attribution fields were stored in the mock vector db
+        stored = mock_memory_vector_db.memories.get("attr-test-1")
+        assert stored is not None
+        assert stored.source_user == "chris"
+        assert stored.source_channel == "discord"
+        assert stored.visibility == "family"
 
     async def test_api_search_with_attribution_filters(self, client):
         """POST /v1/long-term-memory/search accepts attribution filter objects."""

@@ -142,20 +142,25 @@ class TestHandleExtraction:
     async def test_handle_extraction(
         self, mock_extract_entities_llm, mock_extract_topics_llm
     ):
-        """Test extraction with topics/entities (LLM mode - default)"""
-        mock_extract_topics_llm.return_value = ["AI", "business"]
+        """Test extraction with topics/entities (LLM mode - default).
+
+        Note: handle_extraction applies enforce_topics() and clean_entities()
+        after LLM extraction, so mock values must be in the controlled vocabulary.
+        """
+        # Use controlled vocabulary topics — enforce_topics() filters unknowns
+        mock_extract_topics_llm.return_value = ["infrastructure", "work"]
         mock_extract_entities_llm.return_value = ["John", "Sarah", "Google"]
 
         topics, entities = await handle_extraction(
             "John and Sarah discussed AI at Google."
         )
 
-        # Check that topics are as expected
+        # Check that topics survived enforce_topics() filtering
         assert mock_extract_topics_llm.called
-        assert set(topics) == {"AI", "business"}
+        assert set(topics) == {"infrastructure", "work"}
         assert len(topics) == 2
 
-        # Check that entities are as expected
+        # Check that entities survived clean_entities() filtering
         assert mock_extract_entities_llm.called
         assert set(entities) == {"John", "Sarah", "Google"}
         assert len(entities) == 3

@@ -42,6 +42,7 @@ from agent_memory_server.models import (
     MemoryPromptRequest,
     MemoryPromptResponse,
     MemoryRecord,
+    StoreMemoryResponse,
     MemoryRecordResults,
     MemoryStrategyConfig,
     MemoryTypeEnum,
@@ -296,7 +297,7 @@ async def get_current_datetime() -> dict[str, str | int]:
 @mcp_app.tool()
 async def create_long_term_memories(
     memories: list[LenientMemoryRecord],
-) -> AckResponse:
+) -> StoreMemoryResponse:
     """
     Create long-term memories that can be searched later.
 

@@ -56,7 +56,9 @@ class TestMCP:
             )
             assert isinstance(results, CallToolResult)
             assert results.content[0].type == "text"
-            assert results.content[0].text == '{\n  "status": "ok"\n}'
+            # StoreMemoryResponse includes status + optional similar_memories
+            response_data = json.loads(results.content[0].text)
+            assert response_data["status"] == "ok"
 
     @pytest.mark.asyncio
     async def test_search_memory(self, session, mcp_test_setup):

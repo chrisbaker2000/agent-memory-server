@@ -179,17 +179,22 @@ class TestMemoryEndpoints:
             )
             mock_update.return_value = 0
 
+            # Use high recency weight so recency dominates over similarity.
+            # Default 0.9/0.1 keeps semantic dominant; here we flip to 0.3/0.7
+            # so the fresh document outranks the old-but-more-similar one.
             payload = {
                 "text": "q",
                 "namespace": {"eq": "ns1"},
                 "user_id": {"eq": "u1"},
                 "limit": 2,
                 "recency_boost": True,
+                "recency_semantic_weight": 0.3,
+                "recency_recency_weight": 0.7,
             }
             resp = await client.post("/v1/long-term-memory/search", json=payload)
             assert resp.status_code == 200
             data = resp.json()
-            # Expect 'fresh' to be ranked first due to recency boost
+            # Expect 'fresh' to be ranked first due to strong recency weight
             assert len(data["memories"]) == 2
             assert data["memories"][0]["id"] == "fresh"
 
