@@ -94,6 +94,9 @@ ModelNameLiteral = Literal[
     "claude-sonnet-4-5",
     "claude-haiku-4-5",
     "claude-opus-4-5",
+    # Anthropic Claude 4.6 family
+    "claude-sonnet-4-6",
+    "claude-opus-4-6",
 ]
 
 

@@ -588,7 +588,7 @@ async def merge_memories_with_llm(
     if len(user_ids) > 1:
         raise ValueError("Cannot merge memories with different user IDs")
 
-        # Create a unified set of topics and entities
+    # Create a unified set of topics and entities
     all_topics = set()
     all_entities = set()
 

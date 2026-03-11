@@ -27,25 +27,37 @@ logger = get_logger(__name__)
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # ============================================================================
-# Vocabulary loading — single source of truth at ~/.openclaw/config/memory-vocabulary.json
+# Vocabulary loading — path configured via settings.vocabulary_path.
 # Falls back to inline defaults if the config file is missing (e.g. in tests).
 # ============================================================================
 
-_VOCAB_PATH = os.path.expanduser("~/.openclaw/config/memory-vocabulary.json")
 
 def _load_vocabulary() -> dict:
     """Load vocabulary from shared config. Falls back to minimal inline defaults."""
+    vocab_path = os.path.expanduser(settings.vocabulary_path)
     try:
-        with open(_VOCAB_PATH) as f:
+        with open(vocab_path) as f:
             vocab = json.load(f)
-            logger.info(f"Loaded vocabulary from {_VOCAB_PATH}: {len(vocab.get('controlled_topics', []))} topics, {len(vocab.get('topic_map', {}))} mappings")
+            logger.info(
+                "Loaded vocabulary from %s: %d topics, %d mappings",
+                vocab_path,
+                len(vocab.get("controlled_topics", [])),
+                len(vocab.get("topic_map", {})),
+            )
             return vocab
     except FileNotFoundError:
-        logger.warning(f"Vocabulary config not found at {_VOCAB_PATH}, using inline defaults")
+        logger.warning(
+            "Vocabulary config not found at %s, using inline defaults", vocab_path
+        )
         return {}
     except json.JSONDecodeError as e:
-        logger.error(f"Invalid JSON in vocabulary config {_VOCAB_PATH}: {e}, using inline defaults")
+        logger.error(
+            "Invalid JSON in vocabulary config %s: %s, using inline defaults",
+            vocab_path,
+            e,
+        )
         return {}
+
 
 _vocab = _load_vocabulary()
 

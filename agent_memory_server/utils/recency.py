@@ -14,22 +14,24 @@ SECONDS_PER_DAY = 86400.0
 
 def generate_memory_hash(memory: MemoryRecord) -> str:
     """
-    Generate a stable hash for a memory based on text, user_id, and session_id.
+    Generate a stable hash for a memory based on content and identity fields.
+
+    Includes source_user so that memories from different users with identical
+    text are not considered duplicates in a multi-user system.
 
     Args:
         memory: MemoryRecord object containing memory data
 
     Returns:
-        A stable hash string
+        A stable SHA-256 hex digest string
     """
-    # Create a deterministic string representation of the key content fields only
-    # This ensures merged memories with same content have the same hash
     content_fields = {
         "text": memory.text,
         "user_id": memory.user_id,
         "session_id": memory.session_id,
         "namespace": memory.namespace,
         "memory_type": memory.memory_type,
+        "source_user": memory.source_user,
     }
     content_json = json.dumps(content_fields, sort_keys=True)
     return hashlib.sha256(content_json.encode()).hexdigest()
@@ -41,6 +43,7 @@ def generate_memory_hash_from_fields(
     session_id: str | None,
     namespace: str | None,
     memory_type: str,
+    source_user: str | None = None,
 ) -> str:
     """
     Generate a memory hash directly from field values without creating a memory object.
@@ -53,9 +56,10 @@ def generate_memory_hash_from_fields(
         session_id: Session ID
         namespace: Namespace
         memory_type: Memory type
+        source_user: Source user (attribution)
 
     Returns:
-        A stable hash string
+        A stable SHA-256 hex digest string
     """
     content_fields = {
         "text": text,
@@ -63,6 +67,7 @@ def generate_memory_hash_from_fields(
         "session_id": session_id,
         "namespace": namespace,
         "memory_type": memory_type,
+        "source_user": source_user,
     }
     content_json = json.dumps(content_fields, sort_keys=True)
     return hashlib.sha256(content_json.encode()).hexdigest()
@@ -93,6 +98,7 @@ def update_memory_hash_if_text_changed(memory: MemoryRecord, updates: dict) -> d
             session_id=updates.get("session_id", memory.session_id),
             namespace=updates.get("namespace", memory.namespace),
             memory_type=updates.get("memory_type", memory.memory_type),
+            source_user=updates.get("source_user", memory.source_user),
         )
 
     return result_updates

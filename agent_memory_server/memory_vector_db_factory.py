@@ -122,7 +122,7 @@ def _get_embedding_dimensions() -> int:
         f"Using embedding dimensions {settings.redisvl_vector_dimensions} "
         f"from REDISVL_VECTOR_DIMENSIONS setting"
     )
-    return int(settings.redisvl_vector_dimensions)
+    return settings.redisvl_vector_dimensions
 
 
 def _build_redis_schema() -> dict:

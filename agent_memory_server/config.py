@@ -264,6 +264,19 @@ MODEL_CONFIGS = {
         max_tokens=200000,
         embedding_dimensions=1536,
     ),
+    # Claude 4.6 family
+    "claude-sonnet-4-6": ModelConfig(
+        provider=ModelProvider.ANTHROPIC,
+        name="claude-sonnet-4-6",
+        max_tokens=200000,
+        embedding_dimensions=1536,
+    ),
+    "claude-opus-4-6": ModelConfig(
+        provider=ModelProvider.ANTHROPIC,
+        name="claude-opus-4-6",
+        max_tokens=200000,
+        embedding_dimensions=1536,
+    ),
     # AWS Bedrock Embedding Models (with bedrock/ prefix - recommended)
     "bedrock/amazon.titan-embed-text-v2:0": ModelConfig(
         provider=ModelProvider.AWS_BEDROCK,
@@ -406,10 +419,13 @@ class Settings(BaseSettings):
     enable_ner: bool = True
     index_all_messages_in_long_term_memory: bool = False
 
+    # Vocabulary config path for entity/topic quality filtering.
+    # Falls back to inline defaults when the file is missing (e.g. in tests).
+    vocabulary_path: str = "~/.openclaw/config/memory-vocabulary.json"
+
     # RedisVL Settings
-    # TODO: Adapt to memory database settings
     redisvl_distance_metric: str = "COSINE"
-    redisvl_vector_dimensions: str = "1536"
+    redisvl_vector_dimensions: int = 1536
     redisvl_index_prefix: str = "memory_idx"
     redisvl_indexing_algorithm: str = "HNSW"
 

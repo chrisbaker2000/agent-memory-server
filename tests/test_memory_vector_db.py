@@ -21,25 +21,7 @@ from agent_memory_server.models import (
 )
 
 
-class MockEmbeddings:
-    """Mock embeddings for testing."""
-
-    def __init__(self, dimensions: int = 1536):
-        self.dimensions = dimensions
-        self._dimensions = dimensions
-        self.model = "mock-embedding-model"
-
-    def embed_documents(self, texts):
-        return [[0.1] * self.dimensions for _ in texts]
-
-    def embed_query(self, text):
-        return [0.1] * self.dimensions
-
-    async def aembed_documents(self, texts):
-        return [[0.1] * self.dimensions for _ in texts]
-
-    async def aembed_query(self, text):
-        return [0.1] * self.dimensions
+from tests.conftest import MockEmbeddings
 
 
 class TestMemoryVectorDatabase:
