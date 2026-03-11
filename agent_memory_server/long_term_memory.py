@@ -1069,6 +1069,74 @@ async def compact_long_term_memories(
     return total_memories
 
 
+# ============================================================================
+# Content noise guard — rejects operational noise at the universal write funnel.
+# This prevents tweet logs, meta-memories, analytics schemas, monitoring noise,
+# and file-operation records from polluting the memory store.
+# ============================================================================
+
+_NOISE_TWEET_LOG = re.compile(
+    r"Pat posted (?:a tweet|about|an? )|"
+    r"@Hi_Its_Pat (?:posted|tweeted)|"
+    r"tweet was posted|"
+    r"posted (?:a |an )?(?:original )?tweet",
+    re.IGNORECASE,
+)
+
+_NOISE_META_MEMORY = re.compile(
+    r"memory.system.*(?:overhaul|redesign|audit|cleanup|migration|restore)|"
+    r"memory.(?:quality|maintenance|compaction|dedup|consolidat).*(?:ran|completed|phase)|"
+    r"mega.memory.*(?:split|decompos)|"
+    r"(?:disabled|permanently).*dream.cycle|dream.cycle.*(?:disabled|prompt|configured)|"
+    r"docket.*(?:compact|worker|disabled)|"
+    r"backup.*file.*named.*\.(?:json|raw)|"
+    r"(?:orphan|stale).*(?:memory|memories|keys).*(?:found|cleaned|deleted)|"
+    r"memories.*were.*(?:cleaned|fixed|purged|deleted|restored)|"
+    r"decomposition.*(?:task|workflow).*(?:stored|completed)|"
+    r"memory.*hygiene|memory.*remediation|"
+    r"stored a backup file named",
+    re.IGNORECASE,
+)
+
+_NOISE_ANALYTICS_SCHEMA = re.compile(
+    r"(?:table|schema).*(?:column|partition(?:ed)?|cluster(?:ed)?|BigQuery|Dataform)|"
+    r"(?:jitsu_events|google_ads|facebook_capi|meta_ads|mailcoach|marketing_funnel|"
+    r"email_deliverability|property_listing|all_internal|users_unified).*"
+    r"(?:table|column|schema|partition|affected|complex|optimization|source.*dependenc)|"
+    r"interconnected tables.*(?:manage|track|analyze)|"
+    r"The merged memory covers.*(?:advertising|email marketing|SEO metrics)|"
+    # Catch remaining analytics table references with data-dictionary context
+    r"(?:affected table|most complex table|source table).*"
+    r"(?:jitsu_events|facebook_capi|meta_ads|users_unified|marketing_funnel)",
+    re.IGNORECASE,
+)
+
+_NOISE_MONITORING = re.compile(
+    r"no (?:activity|events?) (?:found|detected|recorded)|"
+    r"no raw.scanner|no individual file|"
+    r"(?:PDF|document|file) renamed from (?:scan_|document_)|"
+    r"all services healthy|backup completed successfully",
+    re.IGNORECASE,
+)
+
+
+def _is_noise_content(text: str) -> bool:
+    """Check if memory text is operational noise that should not be stored.
+
+    Returns True for:
+    - Tweet-by-tweet event logs (ephemeral, not durable knowledge)
+    - Meta-memories about the memory system itself
+    - Analytics/BigQuery schema dumps
+    - Monitoring status reports and file-operation records
+    """
+    return bool(
+        _NOISE_TWEET_LOG.search(text)
+        or _NOISE_META_MEMORY.search(text)
+        or _NOISE_ANALYTICS_SCHEMA.search(text)
+        or _NOISE_MONITORING.search(text)
+    )
+
+
 async def index_long_term_memories(
     memories: list[MemoryRecord | ExtractedMemoryRecord],
     redis_client: Redis | None = None,
@@ -1105,6 +1173,16 @@ async def index_long_term_memories(
         if not memory.id:
             logger.warning(
                 f"Skipping memory with empty id: text={memory.text[:50] if memory.text else ''}...",
+            )
+            continue
+
+        # Content noise guard: reject memories that are operational noise,
+        # not genuine user knowledge. This catches all write paths (API,
+        # manager, extraction, promotion, plugin).
+        if _is_noise_content(memory.text):
+            logger.info(
+                f"Skipping noise memory: id={memory.id}, "
+                f"text={memory.text[:80]}...",
             )
             continue
 
