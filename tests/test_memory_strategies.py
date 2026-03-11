@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from agent_memory_server.extraction import resolve_user_display_name
 from agent_memory_server.llm import ChatCompletionResponse
 from agent_memory_server.memory_strategies import (
     MEMORY_STRATEGIES,
@@ -272,3 +273,166 @@ class TestMemoryStrategiesRegistry:
         """Test that all registered strategies inherit from base class."""
         for strategy_class in MEMORY_STRATEGIES.values():
             assert issubclass(strategy_class, BaseMemoryStrategy)
+
+
+class TestResolveUserDisplayName:
+    """Test source_user → display name resolution."""
+
+    def test_none_returns_user(self):
+        """None source_user falls back to 'User'."""
+        assert resolve_user_display_name(None) == "User"
+
+    def test_empty_string_returns_user(self):
+        """Empty string source_user falls back to 'User'."""
+        assert resolve_user_display_name("") == "User"
+
+    def test_system_returns_user(self):
+        """'system' source_user falls back to 'User' (no person behind it)."""
+        assert resolve_user_display_name("system") == "User"
+
+    def test_known_user_from_family_json(self):
+        """Known user resolves via family registry (if family.json is present)."""
+        # This test verifies the lookup path. If family.json is not available
+        # (e.g. in CI), the function falls back to title-casing.
+        result = resolve_user_display_name("chris")
+        # Either "Chris" (family registry) or "Chris" (title-case fallback)
+        assert result[0].isupper()
+        assert "chris" not in result  # Must not return the raw ID
+
+    def test_unknown_user_title_cases(self):
+        """Unknown source_user is title-cased as fallback."""
+        assert resolve_user_display_name("unknownperson") == "Unknownperson"
+
+    def test_already_capitalized_id(self):
+        """Title-case is idempotent on already-capitalized IDs."""
+        assert resolve_user_display_name("Admin") == "Admin"
+
+
+class TestSourceUserNameInPrompts:
+    """Test that source_user_name is threaded through to extraction prompts."""
+
+    @pytest.mark.asyncio
+    async def test_discrete_prompt_contains_real_name(self):
+        """DiscreteMemoryStrategy prompt should contain the resolved user name."""
+        strategy = DiscreteMemoryStrategy()
+        mock_response = ChatCompletionResponse(
+            content='{"memories": []}',
+            finish_reason="stop",
+            prompt_tokens=100,
+            completion_tokens=10,
+            total_tokens=110,
+            model="gpt-4o-mini",
+        )
+
+        with patch(
+            "agent_memory_server.memory_strategies.LLMClient.create_chat_completion",
+            new_callable=AsyncMock,
+            return_value=mock_response,
+        ) as mock_create:
+            await strategy.extract_memories(
+                "I love rowing", source_user_name="Chris Baker"
+            )
+            prompt = mock_create.call_args[1]["messages"][0]["content"]
+            assert "Chris Baker" in prompt
+            # The word "User" as a standalone name placeholder should NOT appear
+            # (it may appear in generic text like "application user" which is fine)
+            assert 'use "User"' not in prompt
+            assert 'always use "User"' not in prompt
+
+    @pytest.mark.asyncio
+    async def test_discrete_prompt_fallback_to_user(self):
+        """Without source_user_name, DiscreteMemoryStrategy falls back to 'User'."""
+        strategy = DiscreteMemoryStrategy()
+        mock_response = ChatCompletionResponse(
+            content='{"memories": []}',
+            finish_reason="stop",
+            prompt_tokens=100,
+            completion_tokens=10,
+            total_tokens=110,
+            model="gpt-4o-mini",
+        )
+
+        with patch(
+            "agent_memory_server.memory_strategies.LLMClient.create_chat_completion",
+            new_callable=AsyncMock,
+            return_value=mock_response,
+        ) as mock_create:
+            await strategy.extract_memories("I love rowing")
+            prompt = mock_create.call_args[1]["messages"][0]["content"]
+            # When no source_user_name, "User" is used as the name
+            assert "The application user is: User" in prompt
+
+    @pytest.mark.asyncio
+    async def test_summary_prompt_contains_real_name(self):
+        """SummaryMemoryStrategy prompt should contain the resolved user name."""
+        strategy = SummaryMemoryStrategy()
+        mock_response = ChatCompletionResponse(
+            content='{"memories": []}',
+            finish_reason="stop",
+            prompt_tokens=100,
+            completion_tokens=10,
+            total_tokens=110,
+            model="gpt-4o-mini",
+        )
+
+        with patch(
+            "agent_memory_server.memory_strategies.LLMClient.create_chat_completion",
+            new_callable=AsyncMock,
+            return_value=mock_response,
+        ) as mock_create:
+            await strategy.extract_memories(
+                "Long conversation...", source_user_name="Lindsey"
+            )
+            prompt = mock_create.call_args[1]["messages"][0]["content"]
+            assert "Lindsey" in prompt
+            assert 'use "User"' not in prompt
+
+    @pytest.mark.asyncio
+    async def test_preferences_prompt_contains_real_name(self):
+        """UserPreferencesMemoryStrategy prompt should contain the resolved name."""
+        strategy = UserPreferencesMemoryStrategy()
+        mock_response = ChatCompletionResponse(
+            content='{"memories": []}',
+            finish_reason="stop",
+            prompt_tokens=100,
+            completion_tokens=10,
+            total_tokens=110,
+            model="gpt-4o-mini",
+        )
+
+        with patch(
+            "agent_memory_server.memory_strategies.LLMClient.create_chat_completion",
+            new_callable=AsyncMock,
+            return_value=mock_response,
+        ) as mock_create:
+            await strategy.extract_memories(
+                "I prefer dark mode", source_user_name="Christian"
+            )
+            prompt = mock_create.call_args[1]["messages"][0]["content"]
+            assert "Christian" in prompt
+            assert 'use "User"' not in prompt
+
+    @pytest.mark.asyncio
+    async def test_custom_prompt_receives_user_name(self):
+        """CustomMemoryStrategy should have user_name available for templates."""
+        custom_prompt = "Extract info about {user_name}: {message}"
+        strategy = CustomMemoryStrategy(custom_prompt=custom_prompt)
+        mock_response = ChatCompletionResponse(
+            content='{"memories": []}',
+            finish_reason="stop",
+            prompt_tokens=100,
+            completion_tokens=10,
+            total_tokens=110,
+            model="gpt-4o-mini",
+        )
+
+        with patch(
+            "agent_memory_server.memory_strategies.LLMClient.create_chat_completion",
+            new_callable=AsyncMock,
+            return_value=mock_response,
+        ) as mock_create:
+            await strategy.extract_memories(
+                "Test message", source_user_name="Ed"
+            )
+            prompt = mock_create.call_args[1]["messages"][0]["content"]
+            assert "Extract info about Ed: Test message" in prompt

@@ -35,7 +35,10 @@ class BaseMemoryStrategy(ABC):
 
     @abstractmethod
     async def extract_memories(
-        self, text: str, context: dict[str, Any] | None = None
+        self,
+        text: str,
+        context: dict[str, Any] | None = None,
+        source_user_name: str | None = None,
     ) -> list[dict[str, Any]]:
         """
         Extract memories from text based on the strategy.
@@ -43,6 +46,10 @@ class BaseMemoryStrategy(ABC):
         Args:
             text: The text to extract memories from
             context: Optional context information for extraction
+            source_user_name: Resolved display name for the source user
+                (e.g. "Chris Baker", "Lindsey"). When provided, extraction
+                prompts use this name instead of the generic "User" placeholder.
+                Falls back to "User" when None.
 
         Returns:
             List of memory dictionaries with keys: type, text, topics, entities
@@ -74,22 +81,23 @@ class DiscreteMemoryStrategy(BaseMemoryStrategy):
 
     CURRENT CONTEXT:
     Current date and time: {current_datetime}
+    The application user is: {user_name}
 
     Extract two types of memories:
     1. EPISODIC: Memories about specific episodes in time.
-       Example: "User had a bad experience on a flight to Paris in 2024"
+       Example: "{user_name} had a bad experience on a flight to Paris in 2024"
 
     2. SEMANTIC: User preferences and general knowledge outside of your training data.
-       Example: "User prefers window seats when flying"
+       Example: "{user_name} prefers window seats when flying"
 
     CONTEXTUAL GROUNDING REQUIREMENTS:
     When extracting memories, you must resolve all contextual references to their concrete referents:
 
-    1. PRONOUNS: Replace ALL pronouns (he/she/they/him/her/them/his/hers/theirs) with the actual person's name, EXCEPT for the application user, who must always be referred to as "User".
-       - "He loves coffee" → "User loves coffee" (if "he" refers to the user)
-       - "I told her about it" → "User told colleague about it" (if "her" refers to a colleague)
-       - "Her experience is valuable" → "User's experience is valuable" (if "her" refers to the user)
-       - "My name is Alice and I prefer tea" → "User prefers tea" (do NOT store the application user's given name in text)
+    1. PRONOUNS: Replace ALL pronouns (he/she/they/him/her/them/his/hers/theirs) with the actual person's name. For the application user, always use "{user_name}".
+       - "He loves coffee" → "{user_name} loves coffee" (if "he" refers to the user)
+       - "I told her about it" → "{user_name} told colleague about it" (if "her" refers to a colleague)
+       - "Her experience is valuable" → "{user_name}'s experience is valuable" (if "her" refers to the user)
+       - "My name is Alice and I prefer tea" → "{user_name} prefers tea"
        - NEVER leave pronouns unresolved - always replace with the specific person's name
 
     2. TEMPORAL REFERENCES: Convert relative time expressions to absolute dates/times using the current datetime provided above
@@ -120,9 +128,9 @@ class DiscreteMemoryStrategy(BaseMemoryStrategy):
         "memories": [
             {{
                 "type": "semantic",
-                "text": "User prefers window seats",
+                "text": "{user_name} prefers window seats",
                 "topics": ["travel", "airline"],
-                "entities": ["User", "window seat"],
+                "entities": ["{user_name}", "window seat"],
             }},
             {{
                 "type": "episodic",
@@ -137,9 +145,9 @@ class DiscreteMemoryStrategy(BaseMemoryStrategy):
     1. Only extract information that would be genuinely useful for future interactions.
     2. Do not extract procedural knowledge - that is handled by the system's built-in tools and prompts.
     3. You are a large language model - do not extract facts that you already know.
-    4. CRITICAL: ALWAYS ground ALL contextual references - never leave ANY pronouns, relative times, or vague place references unresolved. For the application user, always use "User" instead of their given name to avoid stale naming if they change their profile name later.
+    4. CRITICAL: ALWAYS ground ALL contextual references - never leave ANY pronouns, relative times, or vague place references unresolved. For the application user, always use "{user_name}" — NEVER use the generic word "User" as a name.
     5. MANDATORY: Replace every instance of "he/she/they/him/her/them/his/hers/theirs" with the actual person's name.
-    6. MANDATORY: Replace possessive pronouns like "her experience" with "User's experience" (if "her" refers to the user).
+    6. MANDATORY: Replace possessive pronouns like "her experience" with "{user_name}'s experience" (if "her" refers to the user).
     7. If you cannot determine what a contextual reference refers to, either omit that memory or use generic terms like "someone" instead of ungrounded pronouns.
 
     Message:
@@ -148,20 +156,25 @@ class DiscreteMemoryStrategy(BaseMemoryStrategy):
     STEP-BY-STEP PROCESS:
     1. First, identify all pronouns in the text: he, she, they, him, her, them, his, hers, theirs
     2. Determine what person each pronoun refers to based on the context
-    3. Replace every single pronoun with the actual person's name
+    3. Replace every single pronoun with the actual person's name (use "{user_name}" for the application user)
     4. Extract the grounded memories with NO pronouns remaining
 
     Extracted memories:
     """
 
     async def extract_memories(
-        self, text: str, context: dict[str, Any] | None = None
+        self,
+        text: str,
+        context: dict[str, Any] | None = None,
+        source_user_name: str | None = None,
     ) -> list[dict[str, Any]]:
         """Extract discrete semantic and episodic memories from text."""
+        user_name = source_user_name or "User"
         prompt = self.EXTRACTION_PROMPT.format(
             message=text,
             top_k_topics=settings.top_k_topics,
             current_datetime=datetime.now().strftime("%A, %B %d, %Y at %I:%M %p %Z"),
+            user_name=user_name,
         )
 
         async for attempt in AsyncRetrying(stop=stop_after_attempt(3)):
@@ -208,6 +221,7 @@ class SummaryMemoryStrategy(BaseMemoryStrategy):
 
     CURRENT CONTEXT:
     Current date and time: {current_datetime}
+    The application user is: {user_name}
 
     Create a summary that:
     1. Captures the main topics discussed
@@ -218,7 +232,7 @@ class SummaryMemoryStrategy(BaseMemoryStrategy):
     Maximum summary length: {max_length} words
 
     CONTEXTUAL GROUNDING REQUIREMENTS:
-    - Replace all pronouns with specific names (use "User" for the application user)
+    - Replace all pronouns with specific names (use "{user_name}" for the application user — NEVER use the generic word "User" as a name)
     - Convert relative time references to absolute dates using the current datetime
     - Make all references concrete and specific
 
@@ -233,9 +247,9 @@ class SummaryMemoryStrategy(BaseMemoryStrategy):
         "memories": [
             {{
                 "type": "semantic",
-                "text": "User discussed project requirements for new website. Decided to use React and PostgreSQL. User prefers dark theme and mobile-first design. Launch target is March 2025.",
+                "text": "{user_name} discussed project requirements for new website. Decided to use React and PostgreSQL. {user_name} prefers dark theme and mobile-first design. Launch target is March 2025.",
                 "topics": ["project", "website", "technology", "design"],
-                "entities": ["User", "React", "PostgreSQL", "website", "March 2025"]
+                "entities": ["{user_name}", "React", "PostgreSQL", "website", "March 2025"]
             }}
         ]
     }}
@@ -247,13 +261,18 @@ class SummaryMemoryStrategy(BaseMemoryStrategy):
     """
 
     async def extract_memories(
-        self, text: str, context: dict[str, Any] | None = None
+        self,
+        text: str,
+        context: dict[str, Any] | None = None,
+        source_user_name: str | None = None,
     ) -> list[dict[str, Any]]:
         """Extract summary memory from conversation text."""
+        user_name = source_user_name or "User"
         prompt = self.SUMMARY_PROMPT.format(
             message=text,
             max_length=self.max_summary_length,
             current_datetime=datetime.now().strftime("%A, %B %d, %Y at %I:%M %p %Z"),
+            user_name=user_name,
         )
 
         async for attempt in AsyncRetrying(stop=stop_after_attempt(3)):
@@ -289,6 +308,7 @@ class UserPreferencesMemoryStrategy(BaseMemoryStrategy):
 
     CURRENT CONTEXT:
     Current date and time: {current_datetime}
+    The application user is: {user_name}
 
     Focus on extracting:
     1. User preferences (likes/dislikes, preferred options)
@@ -299,7 +319,7 @@ class UserPreferencesMemoryStrategy(BaseMemoryStrategy):
     6. Technology preferences
 
     CONTEXTUAL GROUNDING REQUIREMENTS:
-    - Replace all pronouns with "User" for the application user
+    - Replace all pronouns with "{user_name}" for the application user — NEVER use the generic word "User" as a name
     - Convert relative time references to absolute dates
     - Make all references concrete and specific
 
@@ -314,15 +334,15 @@ class UserPreferencesMemoryStrategy(BaseMemoryStrategy):
         "memories": [
             {{
                 "type": "semantic",
-                "text": "User prefers email notifications over SMS",
+                "text": "{user_name} prefers email notifications over SMS",
                 "topics": ["preferences", "communication", "notifications"],
-                "entities": ["User", "email", "SMS"]
+                "entities": ["{user_name}", "email", "SMS"]
             }},
             {{
                 "type": "semantic",
-                "text": "User works best in the morning and prefers async communication",
+                "text": "{user_name} works best in the morning and prefers async communication",
                 "topics": ["work_patterns", "communication", "schedule"],
-                "entities": ["User", "morning", "async communication"]
+                "entities": ["{user_name}", "morning", "async communication"]
             }}
         ]
     }}
@@ -331,7 +351,7 @@ class UserPreferencesMemoryStrategy(BaseMemoryStrategy):
     1. Only extract clear, actionable preferences
     2. Avoid extracting temporary states or one-time decisions
     3. Focus on patterns and recurring preferences
-    4. Always use "User" for the application user
+    4. Always use "{user_name}" for the application user — NEVER use the generic word "User" as a name
     5. If no clear preferences are found, return an empty memories list
 
     Message:
@@ -341,12 +361,17 @@ class UserPreferencesMemoryStrategy(BaseMemoryStrategy):
     """
 
     async def extract_memories(
-        self, text: str, context: dict[str, Any] | None = None
+        self,
+        text: str,
+        context: dict[str, Any] | None = None,
+        source_user_name: str | None = None,
     ) -> list[dict[str, Any]]:
         """Extract user preferences from text."""
+        user_name = source_user_name or "User"
         prompt = self.PREFERENCES_PROMPT.format(
             message=text,
             current_datetime=datetime.now().strftime("%A, %B %d, %Y at %I:%M %p %Z"),
+            user_name=user_name,
         )
 
         async for attempt in AsyncRetrying(stop=stop_after_attempt(3)):
@@ -396,13 +421,18 @@ class CustomMemoryStrategy(BaseMemoryStrategy):
         self.custom_prompt = custom_prompt
 
     async def extract_memories(
-        self, text: str, context: dict[str, Any] | None = None
+        self,
+        text: str,
+        context: dict[str, Any] | None = None,
+        source_user_name: str | None = None,
     ) -> list[dict[str, Any]]:
         """Extract memories using custom prompt."""
+        user_name = source_user_name or "User"
         # Prepare safe template variables
         template_vars = {
             "message": text,
             "current_datetime": datetime.now().strftime("%A, %B %d, %Y at %I:%M %p %Z"),
+            "user_name": user_name,
         }
 
         # Safely add context and config
@@ -415,6 +445,7 @@ class CustomMemoryStrategy(BaseMemoryStrategy):
             allowed_vars = {
                 "message",
                 "current_datetime",
+                "user_name",
                 "session_id",
                 "namespace",
                 "user_id",

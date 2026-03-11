@@ -56,6 +56,7 @@ class PromptValidator:
     ALLOWED_TEMPLATE_VARS = {
         "message",
         "current_datetime",
+        "user_name",
         "session_id",
         "namespace",
         "user_id",

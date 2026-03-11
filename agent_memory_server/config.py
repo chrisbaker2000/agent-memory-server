@@ -423,6 +423,11 @@ class Settings(BaseSettings):
     # Falls back to inline defaults when the file is missing (e.g. in tests).
     vocabulary_path: str = "~/.openclaw/config/memory-vocabulary.json"
 
+    # Family registry JSON path for resolving source_user → display name.
+    # Used by extraction strategies to replace "User" with real names.
+    # Falls back to source_user as-is when the file is missing (e.g. in tests).
+    family_json_path: str = "~/.openclaw/family.json"
+
     # RedisVL Settings
     redisvl_distance_metric: str = "COSINE"
     redisvl_vector_dimensions: int = 1536

@@ -61,6 +61,76 @@ def _load_vocabulary() -> dict:
 
 _vocab = _load_vocabulary()
 
+
+# ============================================================================
+# Family registry loading — resolves source_user IDs to display names.
+# Used by extraction strategies to replace "User" with real names in prompts.
+# ============================================================================
+
+
+def _load_family_registry() -> dict[str, str]:
+    """Load family registry and build source_user → display name map.
+
+    Returns a dict like {"chris": "Chris Baker", "lindsey": "Lindsey Baker"}.
+    Falls back to empty dict if the file is missing (e.g. in tests).
+    """
+    family_path = os.path.expanduser(settings.family_json_path)
+    try:
+        with open(family_path) as f:
+            data = json.load(f)
+            users = data.get("users", {})
+            name_map: dict[str, str] = {}
+            for user_id, info in users.items():
+                display_name = info.get("displayName", user_id.title())
+                name_map[user_id] = display_name
+            logger.info(
+                "Loaded family registry from %s: %d users",
+                family_path,
+                len(name_map),
+            )
+            return name_map
+    except FileNotFoundError:
+        logger.info(
+            "Family registry not found at %s, will use source_user IDs as-is",
+            family_path,
+        )
+        return {}
+    except (json.JSONDecodeError, KeyError) as e:
+        logger.error(
+            "Error loading family registry from %s: %s",
+            family_path,
+            e,
+        )
+        return {}
+
+
+_family_names: dict[str, str] = _load_family_registry()
+
+
+def resolve_user_display_name(source_user: str | None) -> str:
+    """Resolve a source_user ID to a human-readable display name.
+
+    Lookup order:
+    1. Family registry (e.g. "chris" → "Chris Baker")
+    2. Title-cased source_user (e.g. "chris" → "Chris")
+    3. Fallback to "User" if source_user is None/empty
+
+    Args:
+        source_user: The source_user ID (e.g. "chris", "lindsey", "system")
+
+    Returns:
+        Display name string suitable for use in extraction prompts.
+    """
+    if not source_user or source_user == "system":
+        return "User"
+
+    # Check family registry first
+    if source_user in _family_names:
+        return _family_names[source_user]
+
+    # Fallback: title-case the ID
+    return source_user.title()
+
 # Entity quality constants — loaded from shared config
 ENTITY_STOP_WORDS: set[str] = set(_vocab.get("entity_stop_words", [
     "the", "this", "that", "a", "an", "it", "is", "are", "was", "were",
@@ -654,7 +724,14 @@ async def extract_memories_with_strategy(
         # Process memories with this strategy
         for memory in strategy_memories:
             try:
-                extracted_memories = await strategy.extract_memories(memory.text)
+                # Resolve the display name for the source user so the
+                # extraction prompt uses a real name instead of "User".
+                parent_source_user = source_user or memory.source_user
+                resolved_name = resolve_user_display_name(parent_source_user)
+
+                extracted_memories = await strategy.extract_memories(
+                    memory.text, source_user_name=resolved_name
+                )
 
                 # Resolve attribution for this parent memory
                 parent_user, parent_channel, parent_visibility = (

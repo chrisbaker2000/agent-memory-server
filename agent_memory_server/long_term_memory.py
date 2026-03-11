@@ -500,14 +500,20 @@ async def extract_memories_from_session_thread(
     )
 
     # Use the new memory strategy system for extraction
+    from agent_memory_server.extraction import resolve_user_display_name
     from agent_memory_server.memory_strategies import get_memory_strategy
 
     try:
         # Get the discrete memory strategy for contextual grounding
         strategy = get_memory_strategy("discrete")
 
+        # Resolve the display name so the prompt uses a real name, not "User"
+        resolved_name = resolve_user_display_name(source_user)
+
         # Extract memories using the strategy
-        memories_data = await strategy.extract_memories(full_conversation)
+        memories_data = await strategy.extract_memories(
+            full_conversation, source_user_name=resolved_name
+        )
 
         logger.info(
             f"Extracted {len(memories_data)} memories from session thread {session_id}"
