@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -24,6 +25,62 @@ logger = get_logger(__name__)
 
 # Set tokenizer parallelism environment variable
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+# ============================================================================
+# Vocabulary loading — single source of truth at ~/.openclaw/config/memory-vocabulary.json
+# Falls back to inline defaults if the config file is missing (e.g. in tests).
+# ============================================================================
+
+_VOCAB_PATH = os.path.expanduser("~/.openclaw/config/memory-vocabulary.json")
+
+def _load_vocabulary() -> dict:
+    """Load vocabulary from shared config. Falls back to minimal inline defaults."""
+    try:
+        with open(_VOCAB_PATH) as f:
+            vocab = json.load(f)
+            logger.info(f"Loaded vocabulary from {_VOCAB_PATH}: {len(vocab.get('controlled_topics', []))} topics, {len(vocab.get('topic_map', {}))} mappings")
+            return vocab
+    except FileNotFoundError:
+        logger.warning(f"Vocabulary config not found at {_VOCAB_PATH}, using inline defaults")
+        return {}
+    except json.JSONDecodeError as e:
+        logger.error(f"Invalid JSON in vocabulary config {_VOCAB_PATH}: {e}, using inline defaults")
+        return {}
+
+_vocab = _load_vocabulary()
+
+# Entity quality constants — loaded from shared config
+ENTITY_STOP_WORDS: set[str] = set(_vocab.get("entity_stop_words", [
+    "the", "this", "that", "a", "an", "it", "is", "are", "was", "were",
+    "be", "been", "being", "have", "has", "had", "do", "does", "did",
+    "will", "would", "could", "should", "may", "might", "can", "shall", "must",
+    "he", "she", "we", "they", "i", "you", "me", "him", "her", "us", "them",
+    "my", "your", "his", "its", "our", "their", "what", "which", "who", "whom",
+    "not", "no", "yes", "all", "each", "every", "both", "few", "more", "most",
+    "other", "some", "such", "only", "own", "same", "than", "too", "very",
+    "just", "also", "but", "or", "and", "if", "then", "so", "for", "with",
+    "from", "to", "of", "on", "in", "at", "by", "up", "out", "off",
+    "user", "assistant", "system", "none", "null", "true", "false", "ok", "okay",
+]))
+
+_limits = _vocab.get("limits", {})
+MAX_ENTITY_COUNT = _limits.get("max_entity_count", 30)
+
+# Controlled topic vocabulary — loaded from shared config
+CONTROLLED_TOPICS: set[str] = set(_vocab.get("controlled_topics", [
+    "family", "health", "education", "heritage",
+    "home", "food", "travel", "entertainment", "sports", "media", "collecting",
+    "work", "finances",
+    "openclaw", "infrastructure", "analytics",
+    "communication", "documents", "security",
+]))
+
+# Map common off-vocabulary terms to controlled topics (or None to drop)
+_raw_topic_map = _vocab.get("topic_map", {})
+# Filter out the _comment key if present
+TOPIC_MAP: dict[str, str | None] = {
+    k: v for k, v in _raw_topic_map.items() if not k.startswith("_")
+}
 
 # Global model instances
 _topic_model: "BERTopic | None" = None
@@ -200,6 +257,174 @@ Example: {{"topics": ["machine learning", "data science", "python"]}}
     return topics
 
 
+def clean_entities(entities: list[str]) -> list[str]:
+    """
+    Quality-filter an entity list:
+      1. Strip whitespace and empty strings
+      2. Remove single-word common English stop words
+      3. Deduplicate variants (keep most specific form)
+      4. Remove URLs, file paths, hex IDs, and other non-entity junk
+      5. Cap at MAX_ENTITY_COUNT
+
+    Returns a cleaned list preserving original order (most specific first).
+    """
+    if not entities:
+        return []
+
+    cleaned: list[str] = []
+    seen_lower: set[str] = set()
+
+    for entity in entities:
+        entity = entity.strip().strip('"\'[]{}')
+        if not entity:
+            continue
+
+        # Skip URLs
+        if entity.startswith(("http://", "https://", "ftp://")):
+            continue
+
+        # Skip file paths (starting with / or ~/ or ./)
+        if re.match(r'^[~/.]/', entity):
+            continue
+
+        # Skip hex IDs (>= 16 hex chars)
+        if re.match(r'^[0-9A-Fa-f]{16,}$', entity):
+            continue
+
+        # Skip chmod-style permissions (e.g., "0600")
+        if re.match(r'^0[0-7]{3}$', entity):
+            continue
+
+        # Strip @ and # prefixes
+        if entity.startswith(("@", "#")):
+            entity = entity[1:]
+            if not entity:
+                continue
+
+        # Single-word stop word check (case-insensitive)
+        if " " not in entity and entity.lower() in ENTITY_STOP_WORDS:
+            continue
+
+        # Deduplicate case-insensitively
+        key = entity.lower()
+        if key in seen_lower:
+            continue
+        seen_lower.add(key)
+
+        cleaned.append(entity)
+
+    # Deduplicate variants: if "photos" and "photo organization" both exist,
+    # keep the more specific one ("photo organization")
+    cleaned = _deduplicate_entity_variants(cleaned)
+
+    # Cap at max
+    if len(cleaned) > MAX_ENTITY_COUNT:
+        cleaned = cleaned[:MAX_ENTITY_COUNT]
+
+    return cleaned
+
+
+def _deduplicate_entity_variants(entities: list[str]) -> list[str]:
+    """
+    Remove less-specific entity variants.
+    E.g., if both "photo" and "photo organization" exist, drop "photo".
+    If both "Baker" and "Chris Baker" exist, drop "Baker".
+    Only removes single-word entities that are substrings of multi-word entities.
+    """
+    if len(entities) <= 1:
+        return entities
+
+    multi_word = [e for e in entities if " " in e]
+    if not multi_word:
+        return entities
+
+    # Build a set of single-word entities that appear as part of a multi-word entity
+    to_remove: set[str] = set()
+    for entity in entities:
+        if " " in entity:
+            continue  # Only consider single-word entities for removal
+        entity_lower = entity.lower()
+        for mw in multi_word:
+            # Check if this single word is a component of a multi-word entity
+            mw_words = {w.lower() for w in mw.split()}
+            if entity_lower in mw_words:
+                to_remove.add(entity)
+                break
+
+    if not to_remove:
+        return entities
+
+    return [e for e in entities if e not in to_remove]
+
+
+def enforce_topics(topics: list[str]) -> list[str]:
+    """
+    Enforce the controlled topic vocabulary on a list of topics.
+
+    1. Lowercase and strip
+    2. Map known synonyms to controlled terms
+    3. Drop terms not in controlled vocabulary
+    4. Deduplicate
+    5. Return cleaned list
+
+    This ensures all topics stored in the memory system come from the
+    19-topic taxonomy, whether extracted by LLM, BERT, or set manually.
+    """
+    if not topics:
+        return []
+
+    cleaned: list[str] = []
+    seen: set[str] = set()
+
+    for topic in topics:
+        topic = topic.strip().lower()
+        if not topic:
+            continue
+
+        # Drop long descriptions (>30 chars with spaces — likely sentences)
+        if len(topic) > 30 and " " in topic:
+            continue
+
+        # Direct match to controlled vocabulary
+        if topic in CONTROLLED_TOPICS:
+            if topic not in seen:
+                seen.add(topic)
+                cleaned.append(topic)
+            continue
+
+        # Try mapping
+        mapped = TOPIC_MAP.get(topic)
+        if mapped is not None:
+            if mapped not in seen:
+                seen.add(mapped)
+                cleaned.append(mapped)
+            continue
+
+        # Try substring match against controlled topics
+        matched = False
+        for ct in CONTROLLED_TOPICS:
+            if ct in topic:
+                if ct not in seen:
+                    seen.add(ct)
+                    cleaned.append(ct)
+                matched = True
+                break
+
+        if not matched:
+            # Try substring match against topic map keys
+            for map_key, map_val in TOPIC_MAP.items():
+                if map_key and map_key in topic and map_val is not None:
+                    if map_val not in seen:
+                        seen.add(map_val)
+                        cleaned.append(map_val)
+                    matched = True
+                    break
+
+        # If still no match, drop (not in controlled vocabulary)
+
+    return cleaned
+
+
 def extract_topics_bertopic(text: str, num_topics: int | None = None) -> list[str]:
     """
     Extract topics from text using the BERTopic model.
@@ -260,11 +485,11 @@ async def handle_extraction(text: str) -> tuple[list[str], list[str]]:
         else:
             entities = await extract_entities_llm(text)
 
-    # Deduplicate
-    if topics:
-        topics = list(set(topics))
-    if entities:
-        entities = list(set(entities))
+    # Quality filter: enforce controlled topic vocabulary
+    topics = enforce_topics(topics)
+
+    # Quality filter: clean entities (stop words, variants, cap)
+    entities = clean_entities(entities)
 
     return topics, entities
 
@@ -473,8 +698,8 @@ async def extract_memories_with_strategy(
                 id=str(ulid.ULID()),
                 text=new_memory["text"],
                 memory_type=new_memory.get("type", "episodic"),
-                topics=new_memory.get("topics", []),
-                entities=new_memory.get("entities", []),
+                topics=enforce_topics(new_memory.get("topics", [])),
+                entities=clean_entities(new_memory.get("entities", [])),
                 discrete_memory_extracted="t",
                 extraction_strategy="discrete",  # These are already extracted
                 extraction_strategy_config={},

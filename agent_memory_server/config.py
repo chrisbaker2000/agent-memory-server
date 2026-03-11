@@ -419,10 +419,17 @@ class Settings(BaseSettings):
     working_memory_index_prefix: str = "working_memory:"
 
     # Deduplication Settings (Store-Time)
-    # Distance threshold for semantic similarity when deduplicating at store time
-    # 0.35 works well for catching paraphrased content while avoiding false positives
-    # Lower values are stricter (fewer matches), higher values are looser (more matches)
-    deduplication_distance_threshold: float = 0.35
+    # Distance threshold for semantic similarity when deduplicating at store time.
+    # Set to 0.0 to effectively disable semantic dedup (only hash-based dedup remains).
+    # Previous value was 0.35. Disabled 2026-03-10 because LLM-based merge was
+    # destructive, non-deterministic, and caused the mega-memory disaster.
+    # Hash-based dedup (layers 1 and 2) remain active — those are safe and deterministic.
+    deduplication_distance_threshold: float = 0.0
+
+    # Master switch for semantic dedup at store time. When False, the
+    # deduplicate_by_semantic_search() function returns early without searching.
+    # This is separate from the threshold to make the intent explicit.
+    semantic_dedup_enabled: bool = False
 
     # Docket settings
     docket_name: str = "memory-server"
@@ -500,8 +507,21 @@ Optimized query:"""
     # for deletion during the forgetting cycle (pinned memories are exempt).
     stale_after_cleanup_enabled: bool = True
 
+    # Hybrid search settings
+    # When enabled, search_memories() runs both vector (KNN) and text (BM25) searches,
+    # then merges results using Reciprocal Rank Fusion (RRF). This dramatically improves
+    # recall for short names, project titles, and proper nouns that embedding models
+    # handle poorly. Text search uses the existing TEXT index on the `text` field.
+    hybrid_search_enabled: bool = True
+    hybrid_search_rrf_k: int = 60  # Standard RRF constant; higher = more weight to top ranks
+    hybrid_search_text_results_multiplier: int = 3  # Fetch N * limit results from each source
+
     # Compaction settings
-    compaction_every_minutes: int = 10
+    # Set to 0 to disable automatic compaction entirely.
+    # Previously 10 (every 10 min). Disabled 2026-03-10 because the semantic
+    # merge phase was destructive. Hash-based compaction can still be triggered
+    # manually via the /compact endpoint if needed.
+    compaction_every_minutes: int = 0
 
     # Docket task timeout for LLM-dependent tasks (in minutes)
     # This controls how long tasks like memory compaction, extraction, and summarization

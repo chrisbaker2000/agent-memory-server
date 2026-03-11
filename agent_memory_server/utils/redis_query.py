@@ -60,11 +60,11 @@ class RecencyAggregationQuery(AggregationQuery):
     ) -> RecencyAggregationQuery:
         params = params or {}
 
-        semantic_weight = float(params.get("semantic_weight", 0.8))
-        recency_weight = float(params.get("recency_weight", 0.2))
+        semantic_weight = float(params.get("semantic_weight", 0.9))
+        recency_weight = float(params.get("recency_weight", 0.1))
         freshness_weight = float(params.get("freshness_weight", 0.6))
         novelty_weight = float(params.get("novelty_weight", 0.4))
-        half_life_access = float(params.get("half_life_last_access_days", 7.0))
+        half_life_access = float(params.get("half_life_last_access_days", 14.0))
         half_life_created = float(params.get("half_life_created_days", 30.0))
 
         self.apply(

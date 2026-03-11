@@ -16,6 +16,8 @@ from agent_memory_server.logging import get_logger
 from agent_memory_server.models import (
     AckResponse,
     CreateMemoryRecordRequest,
+    SimilarMemoryInfo,
+    StoreMemoryResponse,
     CreateSummaryViewRequest,
     EditMemoryRecordRequest,
     GetSessionsQuery,
@@ -164,17 +166,23 @@ def _calculate_context_usage_percentages(
 
 
 def _build_recency_params(payload: SearchRequest) -> dict[str, Any]:
-    """Build recency parameters dict from payload."""
+    """Build recency parameters dict from payload.
+
+    Defaults tuned to ensure semantic relevance dominates over recency.
+    With semantic_weight=0.9 and recency_weight=0.1, a perfectly-matching
+    memory that hasn't been accessed in a month still ranks above a
+    recently-accessed but irrelevant memory.
+    """
     return {
         "semantic_weight": (
             payload.recency_semantic_weight
             if payload.recency_semantic_weight is not None
-            else 0.8
+            else 0.9
         ),
         "recency_weight": (
             payload.recency_recency_weight
             if payload.recency_recency_weight is not None
-            else 0.2
+            else 0.1
         ),
         "freshness_weight": (
             payload.recency_freshness_weight
@@ -189,7 +197,7 @@ def _build_recency_params(payload: SearchRequest) -> dict[str, Any]:
         "half_life_last_access_days": (
             payload.recency_half_life_last_access_days
             if payload.recency_half_life_last_access_days is not None
-            else 7.0
+            else 14.0
         ),
         "half_life_created_days": (
             payload.recency_half_life_created_days
@@ -598,10 +606,16 @@ async def delete_working_memory(
     return AckResponse(status="ok")
 
 
-@router.post("/v1/long-term-memory/", response_model=AckResponse)
+@router.post("/v1/long-term-memory/", response_model=StoreMemoryResponse)
 async def create_long_term_memory(
     payload: CreateMemoryRecordRequest,
     background_tasks: HybridBackgroundTasks,
+    detect_conflicts: bool = Query(
+        default=False,
+        description="If true, run synchronous conflict detection before indexing. "
+        "Returns similar_memories in the response for each stored memory. "
+        "Does NOT merge — just reports conflicts for the caller to handle.",
+    ),
     current_user: UserInfo = Depends(get_current_user),
 ):
     """
@@ -610,9 +624,11 @@ async def create_long_term_memory(
     Args:
         payload: Long-term memory payload
         background_tasks: DocketBackgroundTasks instance (injected automatically)
+        detect_conflicts: If true, search for similar existing memories before
+            indexing and include them in the response. Does not merge or delete.
 
     Returns:
-        Acknowledgement response
+        StoreMemoryResponse with status and optional similar_memories
     """
     if not settings.long_term_memory:
         raise HTTPException(status_code=400, detail="Long-term memory is disabled")
@@ -629,12 +645,37 @@ async def create_long_term_memory(
         # Clear any client-provided persisted_at value
         memory.persisted_at = None
 
+    # Conflict detection: synchronous search for similar memories before indexing
+    similar_memories_map: dict[str, list[SimilarMemoryInfo]] | None = None
+    if detect_conflicts:
+        similar_memories_map = {}
+        for memory in payload.memories:
+            if memory.text:
+                similar = await long_term_memory.detect_similar_memories(memory)
+                if similar:
+                    similar_memories_map[memory.id] = [
+                        SimilarMemoryInfo(
+                            id=s["id"],
+                            text=s["text"],
+                            dist=s["dist"],
+                            topics=s.get("topics"),
+                            entities=s.get("entities"),
+                        )
+                        for s in similar
+                    ]
+        # Only include the map if there are actual conflicts
+        if not similar_memories_map:
+            similar_memories_map = None
+
     background_tasks.add_task(
         long_term_memory.index_long_term_memories,
         memories=payload.memories,
         deduplicate=payload.deduplicate,
     )
-    return AckResponse(status="ok")
+    return StoreMemoryResponse(
+        status="ok",
+        similar_memories=similar_memories_map,
+    )
 
 
 @router.post("/v1/long-term-memory/search", response_model=MemoryRecordResultsResponse)

@@ -643,6 +643,32 @@ class AckResponse(BaseModel):
     status: str
 
 
+class SimilarMemoryInfo(BaseModel):
+    """Lightweight record of a similar existing memory found during conflict detection."""
+
+    id: str
+    text: str
+    dist: float
+    topics: list[str] | None = None
+    entities: list[str] | None = None
+
+
+class StoreMemoryResponse(BaseModel):
+    """Response from memory store with optional conflict detection.
+
+    When detect_conflicts=true on the store request, similar_memories will be
+    populated with any existing memories that are semantically close (distance < 0.2)
+    to the stored memories. The caller can inspect these to decide whether to
+    delete duplicates or update existing records.
+
+    Added 2026-03-10 as part of the memory redesign: detect conflicts instead of
+    auto-merging them.
+    """
+
+    status: str
+    similar_memories: dict[str, list[SimilarMemoryInfo]] | None = None
+
+
 class MemoryRecordResult(MemoryRecord):
     """Result from a memory search"""
 

@@ -239,6 +239,9 @@ TASK_MEMORY.md
 augment*.md
 dev_docs/
 
+# Backup files
+*.bak
+
 # Root-level Node artifacts (workbench has its own)
 /node_modules/
 /package.json

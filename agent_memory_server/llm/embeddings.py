@@ -194,6 +194,9 @@ class LiteLLMEmbeddings:
         """
         Async embed a list of documents.
 
+        For nomic-embed-text (Ollama), prepends "search_document: " to each text
+        for optimal retrieval quality. Other models pass texts unchanged.
+
         Args:
             texts: List of texts to embed.
 
@@ -215,13 +218,37 @@ class LiteLLMEmbeddings:
                     "OpenAI's embedding API rejects empty strings."
                 )
 
-        kwargs = self._build_call_kwargs(texts)
-        response = await aembedding(**kwargs)
+        # nomic-embed-text uses task-specific prefixes for optimal retrieval:
+        # "search_document: " for stored documents, "search_query: " for queries.
+        # See: https://huggingface.co/nomic-ai/nomic-embed-text-v1.5
+        prefixed_texts = self._apply_nomic_prefix(texts, task="document")
+
+        kwargs = self._build_call_kwargs(prefixed_texts)
+
+        from agent_memory_server.telemetry import Timer, record_counter, record_histogram
+
+        with Timer() as t:
+            response = await aembedding(**kwargs)
+
+        record_histogram(
+            "memory_server.embedding.duration_ms",
+            t.duration_ms,
+            {"task": "document", "model": self.model, "count": len(texts)},
+        )
+        record_counter(
+            "memory_server.embedding.calls",
+            1.0,
+            {"task": "document", "model": self.model},
+        )
+
         return [item["embedding"] for item in response.data]
 
     async def aembed_query(self, text: str) -> list[float]:
         """
         Async embed a single query text.
+
+        For nomic-embed-text (Ollama), prepends "search_query: " for optimal
+        retrieval quality. Other models pass text unchanged.
 
         Args:
             text: Query text to embed.
@@ -229,5 +256,44 @@ class LiteLLMEmbeddings:
         Returns:
             Embedding vector.
         """
-        result = await self.aembed_documents([text])
-        return result[0]
+        prefixed = self._apply_nomic_prefix([text], task="query")
+        kwargs = self._build_call_kwargs(prefixed)
+
+        from agent_memory_server.telemetry import Timer, record_counter, record_histogram
+
+        with Timer() as t:
+            response = await aembedding(**kwargs)
+
+        record_histogram(
+            "memory_server.embedding.duration_ms",
+            t.duration_ms,
+            {"task": "query", "model": self.model},
+        )
+        record_counter(
+            "memory_server.embedding.calls",
+            1.0,
+            {"task": "query", "model": self.model},
+        )
+
+        return [item["embedding"] for item in response.data][0]
+
+    def _apply_nomic_prefix(self, texts: list[str], task: str) -> list[str]:
+        """Apply task-specific prefix for nomic-embed-text models.
+
+        nomic-embed-text produces higher-quality embeddings when texts are
+        prefixed with the intended retrieval task. This is a no-op for
+        other embedding models.
+
+        Args:
+            texts: Input texts.
+            task: 'document' for stored content, 'query' for search queries.
+
+        Returns:
+            Texts with prefix applied (if nomic model), otherwise unchanged.
+        """
+        model_lower = (self.model or "").lower()
+        if "nomic" not in model_lower:
+            return texts
+
+        prefix = "search_document: " if task == "document" else "search_query: "
+        return [f"{prefix}{t}" for t in texts]

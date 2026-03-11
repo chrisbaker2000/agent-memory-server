@@ -12,6 +12,8 @@ from typing import Any
 import numpy as np
 from redisvl.index import AsyncSearchIndex
 from redisvl.query import FilterQuery, RangeQuery, VectorQuery
+from redisvl.query.filter import Text
+from redisvl.utils.token_escaper import TokenEscaper
 
 from agent_memory_server.filters import (
     CreatedAt,
@@ -85,6 +87,7 @@ class MemoryVectorDatabase(ABC):
         distance_threshold: float | None = None,
         server_side_recency: bool | None = None,
         recency_params: dict | None = None,
+        hybrid_search: bool = True,
         limit: int = 10,
         offset: int = 0,
     ) -> MemoryRecordResults:
@@ -111,6 +114,9 @@ class MemoryVectorDatabase(ABC):
             distance_threshold: Optional similarity threshold
             server_side_recency: Whether to use server-side recency scoring
             recency_params: Parameters for recency scoring
+            hybrid_search: Whether to use hybrid (vector + text BM25) search with RRF.
+                Defaults to True. When enabled and config allows, both vector and text
+                searches run and results are merged via Reciprocal Rank Fusion.
             limit: Maximum number of results
             offset: Offset for pagination
 
@@ -261,12 +267,12 @@ class MemoryVectorDatabase(ABC):
         try:
             now = datetime.now(UTC)
             params = {
-                "semantic_weight": float(recency_params.get("semantic_weight", 0.8))
+                "semantic_weight": float(recency_params.get("semantic_weight", 0.9))
                 if recency_params
-                else 0.8,
-                "recency_weight": float(recency_params.get("recency_weight", 0.2))
+                else 0.9,
+                "recency_weight": float(recency_params.get("recency_weight", 0.1))
                 if recency_params
-                else 0.2,
+                else 0.1,
                 "freshness_weight": float(recency_params.get("freshness_weight", 0.6))
                 if recency_params
                 else 0.6,
@@ -274,10 +280,10 @@ class MemoryVectorDatabase(ABC):
                 if recency_params
                 else 0.4,
                 "half_life_last_access_days": float(
-                    recency_params.get("half_life_last_access_days", 7.0)
+                    recency_params.get("half_life_last_access_days", 14.0)
                 )
                 if recency_params
-                else 7.0,
+                else 14.0,
                 "half_life_created_days": float(
                     recency_params.get("half_life_created_days", 30.0)
                 )
@@ -623,41 +629,241 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
 
         await self._ensure_index()
 
+        from agent_memory_server.telemetry import Timer, record_counter, record_histogram
+
+        with Timer() as t:
+            try:
+                # Prepare memories with defaults
+                for memory in memories:
+                    if not memory.memory_hash:
+                        memory.memory_hash = self.generate_memory_hash(memory)
+                    now = datetime.now(UTC)
+                    if not memory.created_at:
+                        memory.created_at = now
+                    if not memory.last_accessed:
+                        memory.last_accessed = now
+                    if not memory.updated_at:
+                        memory.updated_at = now
+
+                # Generate embeddings for all texts
+                texts = [memory.text for memory in memories]
+                embeddings = await self.embeddings.aembed_documents(texts)
+
+                # Build data dicts with embeddings
+                data_list = []
+                memory_ids = []
+                for memory, embedding in zip(memories, embeddings, strict=False):
+                    data = self._memory_to_data(memory)
+                    data["vector"] = np.array(embedding, dtype=np.float32).tobytes()
+                    data_list.append(data)
+                    memory_ids.append(memory.id)
+
+                # Load into Redis via RedisVL -- use id_field so keys are
+                # auto-generated with the index prefix (e.g. "memory_idx:<id>").
+                # Do NOT pass explicit keys, as that bypasses the prefix.
+                await self._index.load(data_list, id_field="id_")
+
+                record_histogram(
+                    "memory_server.store.duration_ms",
+                    t.duration_ms,
+                    {"count": len(memories)},
+                )
+                record_counter(
+                    "memory_server.store.count",
+                    float(len(memories)),
+                )
+                return memory_ids
+
+            except Exception as e:
+                record_counter(
+                    "memory_server.store.errors",
+                    1.0,
+                    {"error": type(e).__name__},
+                )
+                logger.error(f"Error adding memories to Redis: {e}")
+                raise
+
+    @staticmethod
+    def _escape_text_query(query: str) -> str:
+        """Escape and tokenize a query string for FT.SEARCH text matching.
+
+        Splits the query into words, escapes Redis Search special characters
+        in each word, and joins with spaces (implicit AND in Redis Search).
+        AND logic ensures only documents matching ALL query terms contribute
+        to the text search, preventing false positives from common words
+        like "project" matching unrelated documents.
+
+        Documents matching all terms are precisely what we want for RRF
+        fusion — they represent strong lexical matches. When no documents
+        match all terms, the text search returns empty and we gracefully
+        fall back to vector-only results (no regression).
+
+        Args:
+            query: Raw query string (e.g., "Time Capsule project")
+
+        Returns:
+            Escaped query for Redis text field (e.g., "Time Capsule project"),
+            or empty string if no valid words remain.
+        """
+        escaper = TokenEscaper()
+        words = query.split()
+        if not words:
+            return ""
+        escaped_words: list[str] = []
+        for word in words:
+            word = word.strip()
+            if not word:
+                continue
+            escaped = escaper.escape(word)
+            if escaped:
+                escaped_words.append(escaped)
+        return " ".join(escaped_words)
+
+    async def _text_search(
+        self,
+        query: str,
+        redis_filter: Any | None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Run BM25 text search using RedisVL FilterQuery with Text filter.
+
+        Uses the existing TEXT index on the `text` field. Results are returned
+        in BM25-relevance order (most relevant first). The same metadata filters
+        used for vector search are applied here.
+
+        Args:
+            query: Raw query string
+            redis_filter: Combined RedisVL filter expression (from _build_filter_expression)
+            limit: Maximum number of text results to return
+
+        Returns:
+            List of field dicts in BM25-relevance order, or empty list on failure.
+        """
+        escaped = self._escape_text_query(query)
+        if not escaped:
+            return []
+
+        # Build text filter using RedisVL Text class (LIKE operator for OR matching)
+        text_filter = Text("text") % escaped
+
+        # Combine with metadata filters if present
+        if redis_filter is not None:
+            combined_filter = text_filter & redis_filter
+        else:
+            combined_filter = text_filter
+
         try:
-            # Prepare memories with defaults
-            for memory in memories:
-                if not memory.memory_hash:
-                    memory.memory_hash = self.generate_memory_hash(memory)
-                now = datetime.now(UTC)
-                if not memory.created_at:
-                    memory.created_at = now
-                if not memory.last_accessed:
-                    memory.last_accessed = now
-                if not memory.updated_at:
-                    memory.updated_at = now
-
-            # Generate embeddings for all texts
-            texts = [memory.text for memory in memories]
-            embeddings = await self.embeddings.aembed_documents(texts)
-
-            # Build data dicts with embeddings
-            data_list = []
-            memory_ids = []
-            for memory, embedding in zip(memories, embeddings, strict=False):
-                data = self._memory_to_data(memory)
-                data["vector"] = np.array(embedding, dtype=np.float32).tobytes()
-                data_list.append(data)
-                memory_ids.append(memory.id)
-
-            # Load into Redis via RedisVL -- use id_field so keys are
-            # auto-generated with the index prefix (e.g. "memory_idx:<id>").
-            # Do NOT pass explicit keys, as that bypasses the prefix.
-            await self._index.load(data_list, id_field="id_")
-            return memory_ids
-
+            fq = FilterQuery(
+                filter_expression=combined_filter,
+                return_fields=self.RETURN_FIELDS,
+                num_results=limit,
+            )
+            results = await self._index.query(fq)
+            return results  # List[Dict[str, Any]] in BM25 relevance order
         except Exception as e:
-            logger.error(f"Error adding memories to Redis: {e}")
-            raise
+            logger.warning(f"Hybrid text search failed, using vector-only: {e}")
+            return []
+
+    def _merge_results_rrf(
+        self,
+        vector_results: list[MemoryRecordResult],
+        text_results: list[dict[str, Any]],
+        k: int = 60,
+    ) -> list[MemoryRecordResult]:
+        """Merge vector and text search results using Reciprocal Rank Fusion.
+
+        RRF is rank-based and doesn't require score normalization, making it
+        robust across different score distributions (cosine distance vs BM25).
+
+        Formula: score(d) = sum(1 / (k + rank_i)) for each search containing d
+        where rank_i is the 1-based rank in that result set.
+
+        Results found by both searches get contributions from both ranks,
+        naturally boosting items that are relevant in both modalities.
+
+        After RRF ranking, synthetic `dist` values are assigned so the output
+        distance field reflects the fused ranking rather than the original
+        vector distance. This is critical because downstream consumers sort by
+        `dist` (lower = better). Without this, a text-only exact match would
+        get dist=0.99 and rank below irrelevant vector matches at dist=0.3.
+
+        Synthetic distance formula: dist = 1.0 - (rrf_score / max_rrf_score)
+        - Best result: dist ~= 0.0
+        - Both-source result: lower dist (boosted by dual contributions)
+        - Single-source result: higher dist
+
+        Args:
+            vector_results: Parsed MemoryRecordResult list from vector search
+                (ordered by cosine distance, lower = better)
+            text_results: Raw field dicts from text search
+                (ordered by BM25 relevance, most relevant first)
+            k: RRF constant (default 60). Higher values give more weight to
+                top-ranked results. 60 is the standard value from the original
+                RRF paper (Cormack et al., 2009).
+
+        Returns:
+            Merged list of MemoryRecordResult, sorted by descending RRF score
+            with synthetic dist values reflecting the fused ranking.
+        """
+        rrf_scores: dict[str, float] = {}
+        vector_map: dict[str, MemoryRecordResult] = {}
+        text_map: dict[str, dict[str, Any]] = {}
+
+        # Assign RRF scores from vector results (rank 1-based)
+        for rank, result in enumerate(vector_results):
+            mem_id = result.id
+            if not mem_id:
+                continue
+            rrf_scores[mem_id] = rrf_scores.get(mem_id, 0.0) + 1.0 / (k + rank + 1)
+            vector_map[mem_id] = result
+
+        # Assign RRF scores from text results (rank 1-based)
+        for rank, fields in enumerate(text_results):
+            mem_id = fields.get("id_", "")
+            if not mem_id:
+                continue
+            rrf_scores[mem_id] = rrf_scores.get(mem_id, 0.0) + 1.0 / (k + rank + 1)
+            if mem_id not in text_map:
+                text_map[mem_id] = fields
+
+        # Sort by descending RRF score (higher = more relevant)
+        sorted_ids = sorted(
+            rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True
+        )
+
+        # Convert RRF scores to synthetic distances (0.0 = best match).
+        # Formula: dist = 1.0 - (rrf_score / max_rrf_score)
+        # This ensures the `dist` field in the API response reflects the fused
+        # ranking. Without this, vector-only results with low cosine distance
+        # would outrank text matches that the RRF algorithm ranked higher.
+        max_rrf = max(rrf_scores.values()) if rrf_scores else 1.0
+        synthetic_dists: dict[str, float] = {}
+        for mem_id in sorted_ids:
+            synthetic_dists[mem_id] = 1.0 - (rrf_scores[mem_id] / max_rrf)
+
+        # Build merged result list with synthetic distances
+        merged: list[MemoryRecordResult] = []
+        for mem_id in sorted_ids:
+            syn_dist = synthetic_dists[mem_id]
+            if mem_id in vector_map:
+                # Use the vector result but override dist with synthetic score
+                result = vector_map[mem_id]
+                result.dist = syn_dist
+                merged.append(result)
+            elif mem_id in text_map:
+                # Text-only result: convert to MemoryRecordResult with synthetic dist
+                merged.append(
+                    self._data_to_memory_result(text_map[mem_id], score=syn_dist)
+                )
+
+        overlap_ids = vector_map.keys() & text_map.keys()
+        logger.debug(
+            f"RRF merge: {len(vector_results)} vector + {len(text_results)} text "
+            f"= {len(merged)} merged ({len(overlap_ids)} overlap), "
+            f"max_rrf={max_rrf:.6f}"
+        )
+
+        return merged
 
     async def search_memories(
         self,
@@ -681,10 +887,26 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         distance_threshold: float | None = None,
         server_side_recency: bool | None = None,
         recency_params: dict | None = None,
+        hybrid_search: bool = True,
         limit: int = 10,
         offset: int = 0,
     ) -> MemoryRecordResults:
-        """Search memories using RedisVL vector search."""
+        """Search memories using RedisVL vector search with optional hybrid text fusion.
+
+        When hybrid search is enabled (default), this method runs both:
+        1. Vector (KNN) search using embedding similarity
+        2. Text (BM25) search using Redis full-text index
+
+        Results are merged using Reciprocal Rank Fusion (RRF), which dramatically
+        improves recall for short names, project titles, and proper nouns that
+        embedding models handle poorly.
+        """
+        from agent_memory_server.config import settings
+        from agent_memory_server.telemetry import Timer, record_counter, record_histogram, record_metric
+
+        _search_timer = Timer()
+        _search_timer.__enter__()
+
         await self._ensure_index()
 
         # Build combined filter expression
@@ -708,6 +930,7 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         )
 
         # If server-side recency is requested, attempt aggregation path first
+        # (hybrid search not applied to server-side recency path to avoid complexity)
         if server_side_recency:
             try:
                 return await self._search_with_recency_aggregation(
@@ -723,6 +946,15 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
                     f"RedisVL DB-level recency search failed; falling back to standard path: {e}"
                 )
 
+        # Determine if hybrid search should be used
+        use_hybrid = hybrid_search and settings.hybrid_search_enabled
+
+        # For hybrid search, fetch more results from each source for good fusion
+        if use_hybrid:
+            fetch_count = (limit + offset) * settings.hybrid_search_text_results_multiplier
+        else:
+            fetch_count = limit + offset
+
         # Embed the query
         embedding_vector = await self.embeddings.aembed_query(query)
 
@@ -733,7 +965,7 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
                 vector_field_name="vector",
                 filter_expression=redis_filter,
                 distance_threshold=float(distance_threshold),
-                num_results=limit + offset,
+                num_results=fetch_count,
                 return_fields=self.RETURN_FIELDS,
             )
         else:
@@ -741,42 +973,88 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
                 vector=embedding_vector,
                 vector_field_name="vector",
                 filter_expression=redis_filter,
-                num_results=limit + offset,
+                num_results=fetch_count,
                 return_fields=self.RETURN_FIELDS,
             )
 
-        # Execute search using index.query() which properly passes vector params
+        # Execute vector search
         results = await self._index.query(vq)
 
-        # Parse results (query() returns List[Dict[str, Any]])
-        memory_results: list[MemoryRecordResult] = []
-        for i, fields in enumerate(results):
-            # Apply offset - RedisVL doesn't support native offset for KNN
-            if i < offset:
-                continue
-
-            # Get vector distance score
+        # Parse vector results, deduplicating by ID (same memory may exist under
+        # multiple Redis keys with different hashes but identical id_ values).
+        # Keep the first occurrence (best vector rank) for each unique ID.
+        seen_vector_ids: set[str] = set()
+        vector_results: list[MemoryRecordResult] = []
+        for fields in results:
             score = float(
                 fields.get("vector_distance", fields.get("__vector_score", 0.0)) or 0.0
             )
-
             memory_result = self._data_to_memory_result(fields, score)
-            memory_results.append(memory_result)
+            if memory_result.id and memory_result.id in seen_vector_ids:
+                continue  # Skip duplicate — first occurrence has best vector rank
+            if memory_result.id:
+                seen_vector_ids.add(memory_result.id)
+            vector_results.append(memory_result)
 
-            if len(memory_results) >= limit:
-                break
+        # Run hybrid text search and merge with RRF
+        if use_hybrid:
+            text_results = await self._text_search(query, redis_filter, fetch_count)
 
-        # Client-side recency fallback if server-side was requested
+            if text_results and vector_results:
+                # Both sources returned results — merge with RRF
+                memory_results = self._merge_results_rrf(
+                    vector_results,
+                    text_results,
+                    k=settings.hybrid_search_rrf_k,
+                )
+            elif text_results:
+                # Vector returned nothing, use text-only results
+                memory_results = [
+                    self._data_to_memory_result(fields, score=0.99)
+                    for fields in text_results
+                ]
+            else:
+                # Text returned nothing (or failed), use vector-only
+                memory_results = vector_results
+        else:
+            memory_results = vector_results
+
+        # Apply offset and limit to merged results
+        memory_results = memory_results[offset : offset + limit]
+
+        # Client-side recency fallback if server-side was requested but failed
         if server_side_recency:
             memory_results = self._apply_client_side_recency_reranking(
                 memory_results, recency_params
             )
 
-        next_offset = offset + limit if len(results) > offset + limit else None
+        next_offset = (
+            offset + limit if len(memory_results) == limit else None
+        )
+
+        _search_timer.__exit__(None, None, None)
+        search_type = "hybrid" if use_hybrid else "vector"
+        if server_side_recency:
+            search_type = "recency"
+        record_histogram(
+            "memory_server.search.duration_ms",
+            _search_timer.duration_ms,
+            {"search_type": search_type, "limit": limit},
+        )
+        record_counter(
+            "memory_server.search.count",
+            1.0,
+            {"search_type": search_type},
+        )
+        record_metric(
+            "memory_server.search.results",
+            float(len(memory_results[:limit])),
+            {"search_type": search_type},
+        )
 
         return MemoryRecordResults(
             memories=memory_results[:limit],
-            total=len(results),
+            total=offset + len(memory_results),
             next_offset=next_offset,
         )
 

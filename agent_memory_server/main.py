@@ -104,6 +104,10 @@ async def lifespan(app: FastAPI):
             logger.error(f"Failed to initialize Docket: {e}")
             raise
 
+    # Start telemetry flush thread
+    from agent_memory_server.telemetry import start as start_telemetry, stop as stop_telemetry
+    start_telemetry()
+
     logger.info(
         "Redis Agent Memory Server initialized.",
         generation_model=settings.generation_model,
@@ -114,6 +118,7 @@ async def lifespan(app: FastAPI):
     yield
 
     logger.info("Shutting down Redis Agent Memory Server")
+    stop_telemetry()
     if connection_pool is not None:
         await connection_pool.aclose()
 

@@ -118,7 +118,7 @@ def score_recency(
     - recency = freshness_weight * freshness + novelty_weight * novelty
     """
     half_life_last_access = max(
-        float(params.get("half_life_last_access_days", 7.0)), 0.001
+        float(params.get("half_life_last_access_days", 14.0)), 0.001
     )
     half_life_created = max(float(params.get("half_life_created_days", 30.0)), 0.001)
 
@@ -149,8 +149,8 @@ def rerank_with_recency(
 
     score = semantic_weight * (1 - dist) + recency_weight * recency_score
     """
-    semantic_weight = float(params.get("semantic_weight", 0.8))
-    recency_weight = float(params.get("recency_weight", 0.2))
+    semantic_weight = float(params.get("semantic_weight", 0.9))
+    recency_weight = float(params.get("recency_weight", 0.1))
 
     def combined_score(mem: MemoryRecordResult) -> float:
         similarity = 1.0 - float(mem.dist)

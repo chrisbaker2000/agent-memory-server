@@ -16,6 +16,8 @@ from agent_memory_server.config import settings
 from agent_memory_server.dependencies import get_background_tasks
 from agent_memory_server.extraction import (
     _resolve_parent_attribution,
+    clean_entities,
+    enforce_topics,
     extract_memories_with_strategy,
     handle_extraction,
 )
@@ -153,6 +155,11 @@ Extracted memories:
 
 
 logger = logging.getLogger(__name__)
+
+# Size guards — prevent mega-memory creation (added 2026-03-10)
+MAX_MEMORY_INPUT_CHARS = 500      # Skip merging memories larger than this
+MAX_MEMORY_OUTPUT_CHARS = 1000    # Cap merged output at this length
+MAX_ENTITY_COUNT = 30             # Skip memories with more entities than this
 
 # Debounce configuration for thread-aware extraction (trailing-edge)
 # We use a "pending extraction" key to track when extraction should run
@@ -544,6 +551,10 @@ async def extract_memory_structure(
     merged_topics = memory.topics + topics if memory.topics else topics
     merged_entities = memory.entities + entities if memory.entities else entities
 
+    # Quality filters: enforce controlled topic vocabulary and clean entities
+    merged_topics = enforce_topics(merged_topics)
+    merged_entities = clean_entities(merged_entities)
+
     # Convert lists to pipe-separated strings for TAG fields
     # Issue #156 fix: langchain-redis uses pipe (|) as the default TAG separator
     topics_joined = "|".join(merged_topics) if merged_topics else ""
@@ -697,8 +708,8 @@ Merged memory:"""
         created_at=datetime.fromtimestamp(created_at, UTC),
         last_accessed=datetime.fromtimestamp(last_accessed, UTC),
         updated_at=datetime.now(UTC),
-        topics=list(all_topics) if all_topics else None,
-        entities=list(all_entities) if all_entities else None,
+        topics=enforce_topics(list(all_topics)) if all_topics else None,
+        entities=clean_entities(list(all_entities)) if all_entities else None,
         memory_type=MemoryTypeEnum(memory_type),
         discrete_memory_extracted="t",
         source_user=merged_source_user,
@@ -706,6 +717,22 @@ Merged memory:"""
         visibility=merged_visibility,
         stale_after=merged_stale_after,
     )
+
+    # Size guard: reject oversized merged output (mega-memory prevention)
+    merged_text_len = len(merged_memory.text)
+    merged_entity_count = len(merged_memory.entities) if merged_memory.entities else 0
+    if merged_text_len > MAX_MEMORY_OUTPUT_CHARS:
+        logger.warning(
+            f"Merge rejected: output {merged_text_len} chars exceeds "
+            f"{MAX_MEMORY_OUTPUT_CHARS} char limit. Keeping first memory."
+        )
+        return memories[0]
+    if merged_entity_count > MAX_ENTITY_COUNT:
+        logger.warning(
+            f"Merge rejected: {merged_entity_count} entities exceeds "
+            f"{MAX_ENTITY_COUNT} entity limit. Keeping first memory."
+        )
+        return memories[0]
 
     # Generate a new hash for the merged memory
     merged_memory.memory_hash = generate_memory_hash(merged_memory)
@@ -721,9 +748,13 @@ async def compact_long_term_memories(
     redis_client: Redis | None = None,
     vector_distance_threshold: float = 0.2,
     compact_hash_duplicates: bool = True,
-    compact_semantic_duplicates: bool = True,
+    # Disabled 2026-03-10: semantic merge was destructive. Hash dedup is safe.
+    compact_semantic_duplicates: bool = False,
     perpetual: Perpetual = Perpetual(
-        every=timedelta(minutes=settings.compaction_every_minutes), automatic=True
+        # automatic=False when compaction_every_minutes is 0 (disabled).
+        # The task can still be triggered manually via the /compact endpoint.
+        every=timedelta(minutes=max(settings.compaction_every_minutes, 1)),
+        automatic=settings.compaction_every_minutes > 0,
     ),
     timeout: Timeout = Timeout(timedelta(minutes=settings.llm_task_timeout_minutes)),
 ) -> int:
@@ -733,6 +764,7 @@ async def compact_long_term_memories(
     This function can identify and merge two types of duplicate memories:
     1. Hash-based duplicates: Memories with identical content (using memory_hash)
     2. Semantic duplicates: Memories with similar meaning but different text
+       (DISABLED 2026-03-10 — semantic merge was destructive)
 
     Returns the count of remaining memories after compaction.
     """
@@ -974,6 +1006,16 @@ async def compact_long_term_memories(
 
                     # Add this memory to processed list BEFORE processing to prevent cycles
                     processed_ids.add(memory_id)
+
+                    # Size guard: skip oversized memories from compaction
+                    mem_text_len = len(memory_obj.text) if memory_obj.text else 0
+                    mem_entity_count = len(memory_obj.entities) if memory_obj.entities else 0
+                    if mem_text_len > MAX_MEMORY_INPUT_CHARS or mem_entity_count > MAX_ENTITY_COUNT:
+                        logger.info(
+                            f"Skipping compaction of oversized memory {memory_id}: "
+                            f"{mem_text_len} chars, {mem_entity_count} entities"
+                        )
+                        continue
 
                     # Check for semantic duplicates
                     (
@@ -1518,6 +1560,69 @@ async def deduplicate_by_id(
     return memory, False
 
 
+async def detect_similar_memories(
+    memory: MemoryRecord,
+    distance_threshold: float = 0.2,
+) -> list[dict]:
+    """
+    Find existing memories that are semantically similar to the given memory.
+
+    Unlike deduplicate_by_semantic_search, this function does NOT merge or delete
+    anything. It only reports what it finds, letting the caller decide what to do.
+
+    Added 2026-03-10 as part of the memory redesign: detect conflicts instead of
+    auto-merging them.
+
+    Args:
+        memory: The memory to check for similar existing records
+        distance_threshold: Maximum cosine distance to consider "similar" (default 0.2)
+
+    Returns:
+        List of dicts with keys: id, text, dist, topics, entities
+    """
+    if not memory.text:
+        return []
+
+    db = await get_memory_vector_db()
+
+    namespace_filter = None
+    user_id_filter = None
+    if memory.namespace:
+        namespace_filter = Namespace(eq=memory.namespace)
+    if memory.user_id:
+        user_id_filter = UserId(eq=memory.user_id)
+
+    try:
+        search_result = await db.search_memories(
+            query=memory.text,
+            namespace=namespace_filter,
+            user_id=user_id_filter,
+            distance_threshold=distance_threshold,
+            limit=5,
+        )
+    except Exception as e:
+        logger.warning(f"Conflict detection search failed for memory {memory.id}: {e}")
+        return []
+
+    if not search_result or not search_result.memories:
+        return []
+
+    # Filter out the memory itself
+    similar = []
+    for m in search_result.memories:
+        if m.id == memory.id:
+            continue
+        similar.append({
+            "id": m.id,
+            "text": m.text[:500] if m.text else "",
+            "dist": m.dist,
+            "topics": m.topics,
+            "entities": m.entities,
+        })
+
+    return similar
+
+
 async def deduplicate_by_semantic_search(
     memory: MemoryRecord,
     redis_client: Redis | None = None,
@@ -1549,6 +1654,15 @@ async def deduplicate_by_semantic_search(
     Returns:
         Tuple of (memory to save (potentially merged), was_merged)
     """
+    # Master switch: skip all semantic dedup if disabled in config.
+    # Disabled 2026-03-10 — LLM-based merge was destructive and non-deterministic.
+    # Hash-based dedup (layers 1 and 2) remain active in index_long_term_memories().
+    if not settings.semantic_dedup_enabled:
+        logger.debug(
+            "Semantic dedup disabled (settings.semantic_dedup_enabled=False), skipping",
+        )
+        return memory, False
+
     # Skip semantic deduplication for memories with empty text
     # OpenAI's embedding API rejects empty strings with "'$.input' is invalid"
     if not memory.text:
@@ -1599,6 +1713,23 @@ async def deduplicate_by_semantic_search(
     # Filter out the memory itself from the search results (avoid self-duplication)
     vector_search_result = [m for m in vector_search_result if m.id != memory.id]
 
+    # Size guard: skip merge if the incoming memory is already oversized
+    input_text_len = len(memory.text) if memory.text else 0
+    input_entity_count = len(memory.entities) if memory.entities else 0
+    if input_text_len > MAX_MEMORY_INPUT_CHARS or input_entity_count > MAX_ENTITY_COUNT:
+        logger.info(
+            f"Skipping semantic dedup for oversized memory: "
+            f"{input_text_len} chars, {input_entity_count} entities"
+        )
+        return memory, False
+
+    # Size guard: filter out oversized similar memories from merge candidates
+    vector_search_result = [
+        m for m in vector_search_result
+        if (len(m.text) if m.text else 0) <= MAX_MEMORY_INPUT_CHARS
+        and (len(m.entities) if m.entities else 0) <= MAX_ENTITY_COUNT
+    ]
+
     if vector_search_result and len(vector_search_result) > 0:
         # Found semantically similar memories
         similar_memory_ids = [m.id for m in vector_search_result]
@@ -1607,6 +1738,13 @@ async def deduplicate_by_semantic_search(
         merged_memory = await merge_memories_with_llm(
             [memory] + vector_search_result,
         )
+
+        # If merge was rejected (returned original memory), skip deletion
+        if merged_memory.id == memory.id:
+            logger.info(
+                "Merge was rejected by size guard, keeping all memories as-is"
+            )
+            return memory, False
 
         # Delete the similar memories using the database
         if similar_memory_ids:
@@ -2143,7 +2281,7 @@ def select_ids_for_forgetting(
             "recency_weight": 1.0,
             "freshness_weight": 0.6,
             "novelty_weight": 0.4,
-            "half_life_last_access_days": 7.0,
+            "half_life_last_access_days": 14.0,
             "half_life_created_days": 30.0,
         }
         ranked = rerank_with_recency(eligible_for_budget, now=now, params=params)
