@@ -1101,6 +1101,28 @@ async def index_long_term_memories(
                 f"Skipping memory with empty id: text={memory.text[:50] if memory.text else ''}...",
             )
             continue
+
+        # Size guard: truncate oversized memories at ingestion to prevent bloat.
+        # MAX_MEMORY_OUTPUT_CHARS (1000) is the maximum allowed text length.
+        # This catches all write paths: API, manager, extraction, promotion, plugin.
+        # Oversized text is truncated at the last sentence boundary within the limit.
+        text_len = len(memory.text)
+        if text_len > MAX_MEMORY_OUTPUT_CHARS:
+            truncated = memory.text[:MAX_MEMORY_OUTPUT_CHARS]
+            # Try to truncate at a sentence boundary for cleaner text
+            last_period = truncated.rfind(". ")
+            last_newline = truncated.rfind("\n")
+            best_break = max(last_period, last_newline)
+            if best_break > MAX_MEMORY_OUTPUT_CHARS // 2:
+                truncated = truncated[:best_break + 1].rstrip()
+            else:
+                truncated = truncated.rstrip()
+            memory.text = truncated
+            logger.warning(
+                f"Truncated oversized memory from {text_len} to {len(truncated)} chars: "
+                f"id={memory.id}, text={truncated[:80]}...",
+            )
+
         valid_memories.append(memory)
 
     if not valid_memories:
