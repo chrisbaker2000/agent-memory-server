@@ -14,7 +14,7 @@ from agent_memory_server.config import settings
 from agent_memory_server.filters import DiscreteMemoryExtracted, MemoryType
 from agent_memory_server.llm import LLMClient
 from agent_memory_server.logging import get_logger
-from agent_memory_server.models import MemoryRecord
+from agent_memory_server.models import VISIBILITY_RANK, MemoryRecord
 
 
 if TYPE_CHECKING:
@@ -516,15 +516,6 @@ def _resolve_parent_attribution(
     Returns:
         Tuple of (resolved_source_user, resolved_source_channel, resolved_visibility)
     """
-    visibility_rank = {
-        "everyone": 0,
-        "family": 1,
-        "restricted": 2,
-        "private": 3,
-        "parents": 4,
-        "admin": 5,
-    }
-
     # Resolve source_user: explicit param > first non-None parent
     resolved_user = source_user
     if resolved_user is None:
@@ -548,7 +539,7 @@ def _resolve_parent_attribution(
         parent_visibilities = [m.visibility for m in memories]
         if parent_visibilities:
             resolved_visibility = max(
-                parent_visibilities, key=lambda v: visibility_rank.get(v, 0)
+                parent_visibilities, key=lambda v: VISIBILITY_RANK.get(v, 0)
             )
         else:
             resolved_visibility = "everyone"

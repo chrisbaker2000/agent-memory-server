@@ -22,6 +22,7 @@ Usage:
 
 import logging
 import os
+import platform
 import socket
 import threading
 import time
@@ -51,8 +52,8 @@ TELEMETRY_ENABLED = os.environ.get("MEMORY_SERVER_TELEMETRY", "true").lower() !=
 RESOURCE_ATTRS = [
     {"key": "service.name", "value": {"stringValue": SERVICE_NAME}},
     {"key": "host.name", "value": {"stringValue": HOSTNAME}},
-    {"key": "host.arch", "value": {"stringValue": "arm64"}},
-    {"key": "os.type", "value": {"stringValue": "darwin"}},
+    {"key": "host.arch", "value": {"stringValue": platform.machine()}},
+    {"key": "os.type", "value": {"stringValue": platform.system().lower()}},
     {"key": "deployment.environment", "value": {"stringValue": "homelab"}},
 ]
 
@@ -211,20 +212,20 @@ def _flush_locked() -> None:
     }
 
     try:
-        import requests
+        import httpx
 
-        resp = requests.post(
-            OTLP_ENDPOINT,
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=5,
-        )
-        if resp.status_code not in (200, 202):
-            logger.debug(
-                "Telemetry flush error: HTTP %s - %s",
-                resp.status_code,
-                resp.text[:200],
+        with httpx.Client(timeout=5) as client:
+            resp = client.post(
+                OTLP_ENDPOINT,
+                json=payload,
+                headers={"Content-Type": "application/json"},
             )
+            if resp.status_code not in (200, 202):
+                logger.debug(
+                    "Telemetry flush error: HTTP %s - %s",
+                    resp.status_code,
+                    resp.text[:200],
+                )
     except Exception as e:
         logger.debug("Telemetry flush error: %s", e)
 

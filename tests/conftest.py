@@ -758,6 +758,10 @@ class MockMemoryVectorDatabase(MemoryVectorDatabase):
                 if hasattr(memory.memory_type, "value")
                 else str(memory.memory_type),
                 persisted_at=memory.persisted_at,
+                source_user=memory.source_user,
+                source_channel=memory.source_channel,
+                visibility=memory.visibility,
+                stale_after=memory.stale_after,
             )
             results.append(result)
 
@@ -887,6 +891,10 @@ class MockMemoryVectorDatabase(MemoryVectorDatabase):
                 if hasattr(memory.memory_type, "value")
                 else str(memory.memory_type),
                 persisted_at=memory.persisted_at,
+                source_user=memory.source_user,
+                source_channel=memory.source_channel,
+                visibility=memory.visibility,
+                stale_after=memory.stale_after,
             )
             results.append(result)
 

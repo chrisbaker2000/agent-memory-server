@@ -35,6 +35,10 @@ class RecencyAggregationQuery(AggregationQuery):
         "persisted_at",
         "extracted_from",
         "event_date",
+        "source_user",
+        "source_channel",
+        "visibility",
+        "stale_after",
         "text",
         "__vector_score",
     ]

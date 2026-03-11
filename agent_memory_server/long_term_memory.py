@@ -40,6 +40,7 @@ from agent_memory_server.filters import (
 from agent_memory_server.llm import LLMClient, optimize_query_for_vector_search
 from agent_memory_server.memory_vector_db_factory import get_memory_vector_db
 from agent_memory_server.models import (
+    VISIBILITY_RANK,
     ExtractedMemoryRecord,
     MemoryRecord,
     MemoryRecordResult,
@@ -679,16 +680,10 @@ Merged memory:"""
     )
 
     # visibility: most restrictive wins (higher rank = more restrictive)
-    visibility_rank = {
-        "everyone": 0,
-        "family": 1,
-        "restricted": 2,
-        "private": 3,
-        "parents": 4,
-        "admin": 5,
-    }
     visibility_values = [getattr(m, "visibility", "everyone") for m in memories]
-    merged_visibility = max(visibility_values, key=lambda v: visibility_rank.get(v, 0))
+    merged_visibility = max(
+        visibility_values, key=lambda v: VISIBILITY_RANK.get(v, 0)
+    )
 
     # stale_after: earliest (most conservative) non-None datetime
     stale_after_values = [

@@ -32,6 +32,18 @@ logger = logging.getLogger(__name__)
 
 JSONTypes = str | float | int | bool | list | dict
 
+# Visibility ranking for most-restrictive-wins logic.
+# Higher rank = more restrictive. Used by merge and extraction pipelines.
+# Single source of truth — do not duplicate this dict elsewhere.
+VISIBILITY_RANK: dict[str, int] = {
+    "everyone": 0,
+    "family": 1,
+    "restricted": 2,
+    "private": 3,
+    "parents": 4,
+    "admin": 5,
+}
+
 
 class MemoryTypeEnum(str, Enum):
     """Enum for memory types with string values"""
