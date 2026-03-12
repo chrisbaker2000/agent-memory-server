@@ -481,34 +481,58 @@ async def extract_memories_from_session_thread(
         logger.info(f"No working memory messages found for session {session_id}")
         return []
 
-    # Build full conversation context from all messages
+    # If source_user is None, try to infer from the session ID by matching
+    # the peer ID against family.json identities. This handles the case where
+    # the gateway stores working memory without attribution.
+    from agent_memory_server.extraction import (
+        resolve_user_display_name,
+        resolve_user_from_session_id,
+    )
+
+    if source_user is None:
+        inferred = resolve_user_from_session_id(session_id)
+        if inferred:
+            source_user = inferred
+            logger.info(
+                f"Inferred source_user={inferred} from session ID {session_id}"
+            )
+
+    # Resolve display name for use in conversation labels and extraction prompt.
+    # This ensures the LLM sees "[Chris Baker]: message" instead of "[USER]: message"
+    # and produces "Chris Baker prefers..." instead of "User prefers..."
+    resolved_name = resolve_user_display_name(source_user)
+
+    # Build full conversation context with resolved names as labels
     conversation_messages = []
     for msg in working_memory.messages:
-        # Include role and content for better context
-        role_prefix = (
-            f"[{msg.role.upper()}]: " if hasattr(msg, "role") and msg.role else ""
-        )
+        if hasattr(msg, "role") and msg.role:
+            role_lower = msg.role.lower()
+            if role_lower in ("user", "human"):
+                role_prefix = f"[{resolved_name}]: "
+            elif role_lower in ("assistant", "ai"):
+                role_prefix = "[Pat]: "
+            else:
+                role_prefix = f"[{msg.role.upper()}]: "
+        else:
+            role_prefix = ""
         conversation_messages.append(f"{role_prefix}{msg.content}")
 
     full_conversation = "\n".join(conversation_messages)
 
     logger.info(
-        f"Extracting memories from {len(working_memory.messages)} messages in session {session_id}"
+        f"Extracting memories from {len(working_memory.messages)} messages "
+        f"in session {session_id} (resolved_name={resolved_name})"
     )
     logger.debug(
         f"Full conversation context length: {len(full_conversation)} characters"
     )
 
     # Use the new memory strategy system for extraction
-    from agent_memory_server.extraction import resolve_user_display_name
     from agent_memory_server.memory_strategies import get_memory_strategy
 
     try:
         # Get the discrete memory strategy for contextual grounding
         strategy = get_memory_strategy("discrete")
-
-        # Resolve the display name so the prompt uses a real name, not "User"
-        resolved_name = resolve_user_display_name(source_user)
 
         # Extract memories using the strategy
         memories_data = await strategy.extract_memories(
@@ -1919,6 +1943,25 @@ async def promote_working_memory_to_long_term(
         if wm_memory_records
         else (None, None, "everyone")
     )
+
+    # If attribution wasn't found on working memory records (gateway doesn't
+    # set source_user), try to infer from the session ID peer ID.
+    if session_source_user is None:
+        from agent_memory_server.extraction import resolve_user_from_session_id
+
+        inferred = resolve_user_from_session_id(session_id)
+        if inferred:
+            session_source_user = inferred
+            logger.info(
+                f"Inferred session_source_user={inferred} from session ID "
+                f"{session_id} (working memory had no attribution)"
+            )
+        # Also try to infer channel from session ID
+        if session_source_channel is None and session_id:
+            parts = session_id.split(":")
+            # Pattern: agent:main:discord:direct:peerId
+            if len(parts) >= 3:
+                session_source_channel = parts[2]
 
     # Thread-aware discrete memory extraction with trailing-edge debouncing
     # Instead of extracting immediately, we schedule extraction to run after

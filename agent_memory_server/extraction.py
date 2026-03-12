@@ -68,11 +68,14 @@ _vocab = _load_vocabulary()
 # ============================================================================
 
 
-def _load_family_registry() -> dict[str, str]:
-    """Load family registry and build source_user → display name map.
+def _load_family_registry() -> tuple[dict[str, str], dict[str, str]]:
+    """Load family registry and build two lookup maps.
 
-    Returns a dict like {"chris": "Chris Baker", "lindsey": "Lindsey Baker"}.
-    Falls back to empty dict if the file is missing (e.g. in tests).
+    Returns:
+        Tuple of:
+        - name_map: source_user → full display name (e.g. {"chris": "Chris Baker"})
+        - identity_map: platform_id → source_user (e.g. {"773316001147256832": "chris"})
+    Falls back to empty dicts if the file is missing (e.g. in tests).
     """
     family_path = os.path.expanduser(settings.family_json_path)
     try:
@@ -80,31 +83,45 @@ def _load_family_registry() -> dict[str, str]:
             data = json.load(f)
             users = data.get("users", {})
             name_map: dict[str, str] = {}
+            identity_map: dict[str, str] = {}
             for user_id, info in users.items():
                 display_name = info.get("displayName", user_id.title())
-                name_map[user_id] = display_name
+                # Construct full name — default last name "Baker" matches
+                # session-memory-bridge convention for the Baker household
+                last_name = info.get("lastName", "Baker")
+                full_name = f"{display_name} {last_name}"
+                name_map[user_id] = full_name
+                # Build reverse identity map: platform ID → user_id
+                identities = info.get("identities", {})
+                for platform_id in identities.values():
+                    if platform_id and isinstance(platform_id, str):
+                        # Normalize: strip + prefix for phone numbers, lowercase
+                        normalized = platform_id.lower().lstrip("+")
+                        identity_map[normalized] = user_id
+                        identity_map[platform_id.lower()] = user_id
             logger.info(
-                "Loaded family registry from %s: %d users",
+                "Loaded family registry from %s: %d users, %d identities",
                 family_path,
                 len(name_map),
+                len(identity_map),
             )
-            return name_map
+            return name_map, identity_map
     except FileNotFoundError:
         logger.info(
             "Family registry not found at %s, will use source_user IDs as-is",
             family_path,
         )
-        return {}
+        return {}, {}
     except (json.JSONDecodeError, KeyError) as e:
         logger.error(
             "Error loading family registry from %s: %s",
             family_path,
             e,
         )
-        return {}
+        return {}, {}
 
 
-_family_names: dict[str, str] = _load_family_registry()
+_family_names, _family_identities = _load_family_registry()
 
 
 def resolve_user_display_name(source_user: str | None) -> str:
@@ -130,6 +147,44 @@ def resolve_user_display_name(source_user: str | None) -> str:
 
     # Fallback: title-case the ID
     return source_user.title()
+
+
+def resolve_user_from_session_id(session_id: str | None) -> str | None:
+    """Try to resolve a source_user ID from a session key by matching peer IDs.
+
+    Session keys follow the pattern: agent:main:channel:type:peerId
+    (e.g., "agent:main:discord:direct:773316001147256832").
+
+    Looks up the peer ID against family.json identities to find the user.
+
+    Args:
+        session_id: The session key string.
+
+    Returns:
+        The source_user ID (e.g. "chris") if found, None otherwise.
+    """
+    if not session_id:
+        return None
+
+    parts = session_id.lower().split(":")
+    # Look for "direct" or "dm" scope — these indicate a 1:1 conversation
+    for scope in ("direct", "dm"):
+        try:
+            idx = parts.index(scope)
+            if idx + 1 < len(parts):
+                peer_id = parts[idx + 1]
+                # Look up in identity map (handles normalized + raw forms)
+                if peer_id in _family_identities:
+                    return _family_identities[peer_id]
+                # Also try without + prefix for phone numbers
+                stripped = peer_id.lstrip("+")
+                if stripped in _family_identities:
+                    return _family_identities[stripped]
+        except ValueError:
+            continue
+
+    return None
+
 
 # Entity quality constants — loaded from shared config
 ENTITY_STOP_WORDS: set[str] = set(_vocab.get("entity_stop_words", [

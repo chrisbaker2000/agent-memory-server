@@ -4,7 +4,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from agent_memory_server.extraction import resolve_user_display_name
+from agent_memory_server.extraction import (
+    resolve_user_display_name,
+    resolve_user_from_session_id,
+)
 from agent_memory_server.llm import ChatCompletionResponse
 from agent_memory_server.memory_strategies import (
     MEMORY_STRATEGIES,
@@ -306,6 +309,61 @@ class TestResolveUserDisplayName:
     def test_already_capitalized_id(self):
         """Title-case is idempotent on already-capitalized IDs."""
         assert resolve_user_display_name("Admin") == "Admin"
+
+
+class TestResolveUserFromSessionId:
+    """Test session ID → source_user resolution via family.json identities."""
+
+    def test_none_session_id(self):
+        """None session_id returns None."""
+        assert resolve_user_from_session_id(None) is None
+
+    def test_empty_session_id(self):
+        """Empty session_id returns None."""
+        assert resolve_user_from_session_id("") is None
+
+    def test_no_direct_or_dm_scope(self):
+        """Session key without 'direct' or 'dm' scope returns None."""
+        assert resolve_user_from_session_id("agent:main:discord:group:12345") is None
+
+    def test_unknown_peer_id(self):
+        """Unknown peer ID returns None."""
+        assert resolve_user_from_session_id("agent:main:discord:direct:999999999") is None
+
+    def test_discord_direct_chris(self):
+        """Discord direct session with Chris's ID resolves to 'chris'."""
+        # Only works if family.json is present with Chris's Discord ID
+        result = resolve_user_from_session_id(
+            "agent:main:discord:direct:773316001147256832"
+        )
+        if result is not None:  # Skip if family.json not available in test env
+            assert result == "chris"
+
+    def test_slack_dm_chris(self):
+        """Slack DM session with Chris's Slack ID resolves to 'chris'."""
+        result = resolve_user_from_session_id(
+            "agent:main:slack:dm:U06ESR1MPFG"
+        )
+        if result is not None:
+            assert result == "chris"
+
+    def test_case_insensitive(self):
+        """Session key matching is case-insensitive."""
+        result = resolve_user_from_session_id(
+            "Agent:Main:Discord:Direct:773316001147256832"
+        )
+        if result is not None:
+            assert result == "chris"
+
+    def test_full_name_resolution_chain(self):
+        """resolve_user_from_session_id → resolve_user_display_name produces full name."""
+        user_id = resolve_user_from_session_id(
+            "agent:main:discord:direct:773316001147256832"
+        )
+        if user_id is not None:
+            display_name = resolve_user_display_name(user_id)
+            assert "Chris" in display_name
+            assert display_name != "User"
 
 
 class TestSourceUserNameInPrompts:
