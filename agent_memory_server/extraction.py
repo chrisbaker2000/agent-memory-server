@@ -183,6 +183,13 @@ def resolve_user_from_session_id(session_id: str | None) -> str | None:
         except ValueError:
             continue
 
+    # Fallback: channel/group sessions (e.g., "agent:main:discord:channel:123456")
+    # These don't have a user peer ID. Default to "chris" since he is the primary
+    # user in channel conversations. This prevents empty source_user and "[User]"
+    # labels in extraction prompts.
+    if "channel" in parts:
+        return "chris"
+
     return None
 
 

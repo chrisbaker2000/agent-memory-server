@@ -1231,6 +1231,42 @@ async def index_long_term_memories(
                 f"id={memory.id}, text={truncated[:80]}...",
             )
 
+        # Event date guard: ensure event_date is a proper datetime, not a string.
+        # External scripts writing directly to Redis can store ISO strings like
+        # "2026-02-22" in the NUMERIC event_date field, causing Redis Search to
+        # silently exclude the record from the index (orphan key).
+        if memory.event_date is not None and not isinstance(memory.event_date, datetime):
+            try:
+                memory.event_date = datetime.fromisoformat(str(memory.event_date))
+                logger.warning(
+                    f"Converted string event_date to datetime for memory {memory.id}: "
+                    f"{memory.event_date}"
+                )
+            except (ValueError, TypeError):
+                logger.warning(
+                    f"Invalid event_date for memory {memory.id}, setting to None: "
+                    f"{memory.event_date!r}"
+                )
+                memory.event_date = None
+
+        # "User" text guard: reject memories that use "User" as a person name.
+        # This catches all extraction paths that fail to resolve the actual name.
+        # Pattern: text starts with "User " (after optional tag) or sentence
+        # starts with "User " followed by a verb — indicates the LLM used "User"
+        # as a person reference instead of an actual name.
+        _stripped = re.sub(r"^\[.*?\]\s*", "", memory.text)
+        if re.match(r"^User\s+(?:is|was|has|had|does|did|prefers|likes|wants|"
+                     r"mentioned|asked|enjoys|works|lives|loves|needs|feels|"
+                     r"believes|thinks|participates|uses|values|gave|ordered|"
+                     r"bought|tends|keeps|expressed|currently|also|recently)\b",
+                     _stripped):
+            logger.warning(
+                f"Rejecting memory with 'User' as person reference "
+                f"(source_user={getattr(memory, 'source_user', None)}): "
+                f"id={memory.id}, text={memory.text[:80]}..."
+            )
+            continue
+
         valid_memories.append(memory)
 
     if not valid_memories:
