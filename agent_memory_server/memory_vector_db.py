@@ -949,11 +949,26 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         # Determine if hybrid search should be used
         use_hybrid = hybrid_search and settings.hybrid_search_enabled
 
-        # For hybrid search, fetch more results from each source for good fusion
+        # For hybrid search, fetch more results from each source for good fusion.
+        # Redis FT.SEARCH has a hard LIMIT cap of 10,000 (offset + count).
+        # When paginating through large result sets (e.g., backup scans), the
+        # offset can push fetch_count past this limit. Clamp to 10,000 and
+        # disable hybrid search for the request if even the base count exceeds
+        # the cap (hybrid needs the multiplier headroom for good fusion).
+        REDIS_SEARCH_LIMIT_CAP = 10000
         if use_hybrid:
             fetch_count = (limit + offset) * settings.hybrid_search_text_results_multiplier
+            if fetch_count > REDIS_SEARCH_LIMIT_CAP:
+                # Fall back to non-hybrid: offset is too high for multiplied fetch
+                fetch_count = min(limit + offset, REDIS_SEARCH_LIMIT_CAP)
+                use_hybrid = False
+                logger.debug(
+                    f"Hybrid search disabled for this request: "
+                    f"fetch_count would exceed {REDIS_SEARCH_LIMIT_CAP} "
+                    f"(limit={limit}, offset={offset}, multiplier={settings.hybrid_search_text_results_multiplier})"
+                )
         else:
-            fetch_count = limit + offset
+            fetch_count = min(limit + offset, REDIS_SEARCH_LIMIT_CAP)
 
         # Embed the query
         embedding_vector = await self.embeddings.aembed_query(query)

@@ -1074,3 +1074,85 @@ class TestHybridSearch:
         query_obj = call_args[0][0]
         # VectorQuery has num_results attribute
         assert hasattr(query_obj, '_num_results') or True  # Structure varies by version
+
+    @pytest.mark.asyncio
+    async def test_search_memories_hybrid_limit_cap_disables_hybrid(self):
+        """Test that hybrid search is disabled when offset pushes fetch_count past Redis 10K cap.
+
+        Redis FT.SEARCH has a hard LIMIT cap of 10,000. When paginating through
+        large result sets (e.g., memory backup), the offset can grow large enough
+        that (limit + offset) * multiplier > 10,000. The code should detect this
+        and fall back to non-hybrid (vector-only) search with a clamped fetch_count.
+        """
+        db = self._make_db()
+
+        # With limit=100, offset=3400, multiplier=3:
+        # (100 + 3400) * 3 = 10,500 > 10,000 cap
+        # Should fall back to vector-only with fetch_count = min(3500, 10000) = 3500
+        db._index.query = AsyncMock(return_value=[])
+
+        with patch("agent_memory_server.config.settings") as mock_settings:
+            mock_settings.hybrid_search_enabled = True
+            mock_settings.hybrid_search_rrf_k = 60
+            mock_settings.hybrid_search_text_results_multiplier = 3
+
+            results = await db.search_memories(
+                query="test query",
+                hybrid_search=True,
+                limit=100,
+                offset=3400,
+            )
+
+        # Should only have ONE query call (vector-only), not two (hybrid)
+        assert db._index.query.call_count == 1, (
+            "Expected 1 query (vector-only) but got "
+            f"{db._index.query.call_count} (hybrid should be disabled at high offset)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_search_memories_non_hybrid_limit_cap(self):
+        """Test that non-hybrid search also clamps fetch_count at 10K Redis cap."""
+        db = self._make_db()
+
+        db._index.query = AsyncMock(return_value=[])
+
+        with patch("agent_memory_server.config.settings") as mock_settings:
+            mock_settings.hybrid_search_enabled = False
+            mock_settings.hybrid_search_rrf_k = 60
+            mock_settings.hybrid_search_text_results_multiplier = 3
+
+            # offset=9995, limit=100 -> base fetch_count=10095 > 10000
+            results = await db.search_memories(
+                query="test query",
+                hybrid_search=False,
+                limit=100,
+                offset=9995,
+            )
+
+        # Should succeed without Redis LIMIT error (clamped to 10000)
+        assert db._index.query.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_search_memories_hybrid_within_limit_stays_hybrid(self):
+        """Test that hybrid search stays enabled when fetch_count is within 10K cap."""
+        db = self._make_db()
+
+        db._index.query = AsyncMock(return_value=[])
+
+        with patch("agent_memory_server.config.settings") as mock_settings:
+            mock_settings.hybrid_search_enabled = True
+            mock_settings.hybrid_search_rrf_k = 60
+            mock_settings.hybrid_search_text_results_multiplier = 3
+
+            # limit=50, offset=100 -> (50+100)*3 = 450, well within 10000
+            results = await db.search_memories(
+                query="test query",
+                hybrid_search=True,
+                limit=50,
+                offset=100,
+            )
+
+        # Should have TWO query calls (vector + text = hybrid)
+        assert db._index.query.call_count == 2, (
+            f"Expected 2 queries (hybrid) but got {db._index.query.call_count}"
+        )

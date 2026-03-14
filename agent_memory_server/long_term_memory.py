@@ -2058,6 +2058,16 @@ async def promote_working_memory_to_long_term(
         if memory.persisted_at is None:
             # This memory needs to be promoted
 
+            # Apply session-level attribution to promoted memories that lack it.
+            # The gateway plugin doesn't pass source_user/visibility on working
+            # memory records, so we backfill from the session-resolved values.
+            if not memory.source_user and session_source_user:
+                memory.source_user = session_source_user
+            if not memory.source_channel and session_source_channel:
+                memory.source_channel = session_source_channel
+            if (not memory.visibility or memory.visibility == "everyone") and session_visibility != "everyone":
+                memory.visibility = session_visibility
+
             # Check for id-based duplicates and handle accordingly
             deduped_memory, was_overwrite = await deduplicate_by_id(
                 memory=memory,
