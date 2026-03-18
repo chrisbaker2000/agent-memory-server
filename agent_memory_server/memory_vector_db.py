@@ -222,7 +222,13 @@ class MemoryVectorDatabase(ABC):
         pass
 
     def _parse_list_field(self, field_value: Any) -> list[str]:
-        """Parse a field that might be a list, comma-separated string, or None.
+        """Parse a field that may be a list, pipe-delimited string, or None.
+
+        The canonical delimiter is ``|`` (pipe).  Legacy data stored with
+        commas is handled as a fallback when no pipe is present, but new
+        writes always use pipe (see ``_memory_to_data``).  This matters
+        because entity values can legitimately contain commas
+        (e.g. "Washington, D.C.").
 
         Args:
             field_value: Value that may be a list, string, or None
@@ -235,7 +241,12 @@ class MemoryVectorDatabase(ABC):
         if isinstance(field_value, list):
             return field_value
         if isinstance(field_value, str):
-            return field_value.split(",") if field_value else []
+            if "|" in field_value:
+                return [part.strip() for part in field_value.split("|") if part.strip()]
+            # Comma fallback: existing Redis data written before the pipe migration
+            # still uses commas.  Do not remove this branch until all keys have been
+            # re-indexed (or a migration has run).
+            return [part.strip() for part in field_value.split(",") if part.strip()]
         return []
 
     def generate_memory_hash(self, memory: MemoryRecord) -> str:
@@ -355,7 +366,7 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
     def _memory_to_data(self, memory: MemoryRecord) -> dict[str, Any]:
         """Convert a MemoryRecord to a data dict for RedisVL storage.
 
-        Uses Unix timestamps for datetime fields and comma-separated strings
+        Uses Unix timestamps for datetime fields and pipe-separated strings
         for list fields (topics, entities, extracted_from).
 
         Args:
@@ -380,11 +391,11 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         pinned_int = 1 if getattr(memory, "pinned", False) else 0
         access_count_int = int(getattr(memory, "access_count", 0) or 0)
 
-        # Convert list fields to comma-separated strings for Redis tag fields
-        topics_str = ",".join(memory.topics) if memory.topics else ""
-        entities_str = ",".join(memory.entities) if memory.entities else ""
+        # Convert list fields to pipe-separated strings for Redis tag fields
+        topics_str = "|".join(memory.topics) if memory.topics else ""
+        entities_str = "|".join(memory.entities) if memory.entities else ""
         extracted_from_str = (
-            ",".join(memory.extracted_from) if memory.extracted_from else ""
+            "|".join(memory.extracted_from) if memory.extracted_from else ""
         )
 
         memory_type_val = (
@@ -434,7 +445,8 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         """Convert a search result dict to a MemoryRecordResult.
 
         Handles parsing of Unix timestamps back to datetime objects,
-        comma-separated strings back to lists, and type coercions.
+        pipe-separated strings back to lists (with comma fallback for
+        legacy data), and type coercions.
 
         Args:
             fields: Dictionary of field values from search results
@@ -906,148 +918,148 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
 
         _search_timer = Timer()
         _search_timer.__enter__()
+        try:
+            await self._ensure_index()
 
-        await self._ensure_index()
-
-        # Build combined filter expression
-        redis_filter = self._build_filter_expression(
-            session_id=session_id,
-            user_id=user_id,
-            namespace=namespace,
-            memory_type=memory_type,
-            topics=topics,
-            entities=entities,
-            created_at=created_at,
-            last_accessed=last_accessed,
-            event_date=event_date,
-            memory_hash=memory_hash,
-            id=id,
-            discrete_memory_extracted=discrete_memory_extracted,
-            source_user=source_user,
-            source_channel=source_channel,
-            visibility=visibility,
-            stale_after=stale_after,
-        )
-
-        # If server-side recency is requested, attempt aggregation path first
-        # (hybrid search not applied to server-side recency path to avoid complexity)
-        if server_side_recency:
-            try:
-                return await self._search_with_recency_aggregation(
-                    query=query,
-                    redis_filter=redis_filter,
-                    limit=limit,
-                    offset=offset,
-                    distance_threshold=distance_threshold,
-                    recency_params=recency_params,
-                )
-            except Exception as e:
-                logger.warning(
-                    f"RedisVL DB-level recency search failed; falling back to standard path: {e}"
-                )
-
-        # Determine if hybrid search should be used
-        use_hybrid = hybrid_search and settings.hybrid_search_enabled
-
-        # For hybrid search, fetch more results from each source for good fusion.
-        # Redis FT.SEARCH has a hard LIMIT cap of 10,000 (offset + count).
-        # When paginating through large result sets (e.g., backup scans), the
-        # offset can push fetch_count past this limit. Clamp to 10,000 and
-        # disable hybrid search for the request if even the base count exceeds
-        # the cap (hybrid needs the multiplier headroom for good fusion).
-        REDIS_SEARCH_LIMIT_CAP = 10000
-        if use_hybrid:
-            fetch_count = (limit + offset) * settings.hybrid_search_text_results_multiplier
-            if fetch_count > REDIS_SEARCH_LIMIT_CAP:
-                # Fall back to non-hybrid: offset is too high for multiplied fetch
-                fetch_count = min(limit + offset, REDIS_SEARCH_LIMIT_CAP)
-                use_hybrid = False
-                logger.debug(
-                    f"Hybrid search disabled for this request: "
-                    f"fetch_count would exceed {REDIS_SEARCH_LIMIT_CAP} "
-                    f"(limit={limit}, offset={offset}, multiplier={settings.hybrid_search_text_results_multiplier})"
-                )
-        else:
-            fetch_count = min(limit + offset, REDIS_SEARCH_LIMIT_CAP)
-
-        # Embed the query
-        embedding_vector = await self.embeddings.aembed_query(query)
-
-        # Build vector query
-        if distance_threshold is not None:
-            vq = RangeQuery(
-                vector=embedding_vector,
-                vector_field_name="vector",
-                filter_expression=redis_filter,
-                distance_threshold=float(distance_threshold),
-                num_results=fetch_count,
-                return_fields=self.RETURN_FIELDS,
-            )
-        else:
-            vq = VectorQuery(
-                vector=embedding_vector,
-                vector_field_name="vector",
-                filter_expression=redis_filter,
-                num_results=fetch_count,
-                return_fields=self.RETURN_FIELDS,
+            # Build combined filter expression
+            redis_filter = self._build_filter_expression(
+                session_id=session_id,
+                user_id=user_id,
+                namespace=namespace,
+                memory_type=memory_type,
+                topics=topics,
+                entities=entities,
+                created_at=created_at,
+                last_accessed=last_accessed,
+                event_date=event_date,
+                memory_hash=memory_hash,
+                id=id,
+                discrete_memory_extracted=discrete_memory_extracted,
+                source_user=source_user,
+                source_channel=source_channel,
+                visibility=visibility,
+                stale_after=stale_after,
             )
 
-        # Execute vector search
-        results = await self._index.query(vq)
+            # If server-side recency is requested, attempt aggregation path first
+            # (hybrid search not applied to server-side recency path to avoid complexity)
+            if server_side_recency:
+                try:
+                    return await self._search_with_recency_aggregation(
+                        query=query,
+                        redis_filter=redis_filter,
+                        limit=limit,
+                        offset=offset,
+                        distance_threshold=distance_threshold,
+                        recency_params=recency_params,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"RedisVL DB-level recency search failed; falling back to standard path: {e}"
+                    )
 
-        # Parse vector results, deduplicating by ID (same memory may exist under
-        # multiple Redis keys with different hashes but identical id_ values).
-        # Keep the first occurrence (best vector rank) for each unique ID.
-        seen_vector_ids: set[str] = set()
-        vector_results: list[MemoryRecordResult] = []
-        for fields in results:
-            score = float(
-                fields.get("vector_distance", fields.get("__vector_score", 0.0)) or 0.0
-            )
-            memory_result = self._data_to_memory_result(fields, score)
-            if memory_result.id and memory_result.id in seen_vector_ids:
-                continue  # Skip duplicate — first occurrence has best vector rank
-            if memory_result.id:
-                seen_vector_ids.add(memory_result.id)
-            vector_results.append(memory_result)
+            # Determine if hybrid search should be used
+            use_hybrid = hybrid_search and settings.hybrid_search_enabled
 
-        # Run hybrid text search and merge with RRF
-        if use_hybrid:
-            text_results = await self._text_search(query, redis_filter, fetch_count)
-
-            if text_results and vector_results:
-                # Both sources returned results — merge with RRF
-                memory_results = self._merge_results_rrf(
-                    vector_results,
-                    text_results,
-                    k=settings.hybrid_search_rrf_k,
-                )
-            elif text_results:
-                # Vector returned nothing, use text-only results
-                memory_results = [
-                    self._data_to_memory_result(fields, score=0.99)
-                    for fields in text_results
-                ]
+            # For hybrid search, fetch more results from each source for good fusion.
+            # Redis FT.SEARCH has a hard LIMIT cap of 10,000 (offset + count).
+            # When paginating through large result sets (e.g., backup scans), the
+            # offset can push fetch_count past this limit. Clamp to 10,000 and
+            # disable hybrid search for the request if even the base count exceeds
+            # the cap (hybrid needs the multiplier headroom for good fusion).
+            REDIS_SEARCH_LIMIT_CAP = 10000
+            if use_hybrid:
+                fetch_count = (limit + offset) * settings.hybrid_search_text_results_multiplier
+                if fetch_count > REDIS_SEARCH_LIMIT_CAP:
+                    # Fall back to non-hybrid: offset is too high for multiplied fetch
+                    fetch_count = min(limit + offset, REDIS_SEARCH_LIMIT_CAP)
+                    use_hybrid = False
+                    logger.debug(
+                        f"Hybrid search disabled for this request: "
+                        f"fetch_count would exceed {REDIS_SEARCH_LIMIT_CAP} "
+                        f"(limit={limit}, offset={offset}, multiplier={settings.hybrid_search_text_results_multiplier})"
+                    )
             else:
-                # Text returned nothing (or failed), use vector-only
+                fetch_count = min(limit + offset, REDIS_SEARCH_LIMIT_CAP)
+
+            # Embed the query
+            embedding_vector = await self.embeddings.aembed_query(query)
+
+            # Build vector query
+            if distance_threshold is not None:
+                vq = RangeQuery(
+                    vector=embedding_vector,
+                    vector_field_name="vector",
+                    filter_expression=redis_filter,
+                    distance_threshold=float(distance_threshold),
+                    num_results=fetch_count,
+                    return_fields=self.RETURN_FIELDS,
+                )
+            else:
+                vq = VectorQuery(
+                    vector=embedding_vector,
+                    vector_field_name="vector",
+                    filter_expression=redis_filter,
+                    num_results=fetch_count,
+                    return_fields=self.RETURN_FIELDS,
+                )
+
+            # Execute vector search
+            results = await self._index.query(vq)
+
+            # Parse vector results, deduplicating by ID (same memory may exist under
+            # multiple Redis keys with different hashes but identical id_ values).
+            # Keep the first occurrence (best vector rank) for each unique ID.
+            seen_vector_ids: set[str] = set()
+            vector_results: list[MemoryRecordResult] = []
+            for fields in results:
+                score = float(
+                    fields.get("vector_distance", fields.get("__vector_score", 0.0)) or 0.0
+                )
+                memory_result = self._data_to_memory_result(fields, score)
+                if memory_result.id and memory_result.id in seen_vector_ids:
+                    continue  # Skip duplicate — first occurrence has best vector rank
+                if memory_result.id:
+                    seen_vector_ids.add(memory_result.id)
+                vector_results.append(memory_result)
+
+            # Run hybrid text search and merge with RRF
+            if use_hybrid:
+                text_results = await self._text_search(query, redis_filter, fetch_count)
+
+                if text_results and vector_results:
+                    # Both sources returned results — merge with RRF
+                    memory_results = self._merge_results_rrf(
+                        vector_results,
+                        text_results,
+                        k=settings.hybrid_search_rrf_k,
+                    )
+                elif text_results:
+                    # Vector returned nothing, use text-only results
+                    memory_results = [
+                        self._data_to_memory_result(fields, score=0.99)
+                        for fields in text_results
+                    ]
+                else:
+                    # Text returned nothing (or failed), use vector-only
+                    memory_results = vector_results
+            else:
                 memory_results = vector_results
-        else:
-            memory_results = vector_results
 
-        # Apply offset and limit to merged results
-        memory_results = memory_results[offset : offset + limit]
+            # Apply offset and limit to merged results
+            memory_results = memory_results[offset : offset + limit]
 
-        # Client-side recency fallback if server-side was requested but failed
-        if server_side_recency:
-            memory_results = self._apply_client_side_recency_reranking(
-                memory_results, recency_params
+            # Client-side recency fallback if server-side was requested but failed
+            if server_side_recency:
+                memory_results = self._apply_client_side_recency_reranking(
+                    memory_results, recency_params
+                )
+
+            next_offset = (
+                offset + limit if len(memory_results) == limit else None
             )
-
-        next_offset = (
-            offset + limit if len(memory_results) == limit else None
-        )
-
-        _search_timer.__exit__(None, None, None)
+        finally:
+            _search_timer.__exit__(None, None, None)
         search_type = "hybrid" if use_hybrid else "vector"
         if server_side_recency:
             search_type = "recency"

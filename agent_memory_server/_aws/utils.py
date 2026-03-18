@@ -45,11 +45,14 @@ def bedrock_embedding_model_exists(
                 return True
         return False
     except ClientError:
+        # Intentionally True: this is a pre-check, not a gate.  If credentials
+        # are misconfigured, we want the real embedding call to surface the
+        # actual error rather than masking it behind "model not found".
         logger.exception(
             f"Error checking if Bedrock embedding model {model_id} exists. "
-            "Defaulting to False."
+            "Defaulting to True to allow the actual embedding call to proceed."
         )
-        return False
+        return True
 
 
 @cached(cache=TTLCache(maxsize=16, ttl=60 * 60))  # 1 hour
@@ -82,8 +85,9 @@ def bedrock_llm_model_exists(
                 return True
         return False
     except ClientError:
+        # Intentionally True — same rationale as bedrock_embedding_model_exists.
         logger.exception(
             f"Error checking if Bedrock LLM model {model_id} exists. "
-            "Defaulting to False."
+            "Defaulting to True to allow the actual LLM call to proceed."
         )
-        return False
+        return True

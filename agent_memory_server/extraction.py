@@ -519,15 +519,19 @@ def enforce_topics(topics: list[str]) -> list[str]:
     1. Lowercase and strip
     2. Direct match against CONTROLLED_TOPICS (O(1) set lookup)
     3. Map known synonyms via TOPIC_MAP
-    4. Substring match against CONTROLLED_TOPICS_SORTED (longest-first
+    4. Word-boundary match against CONTROLLED_TOPICS_SORTED (longest-first
        for deterministic resolution when a topic contains multiple
        controlled-topic substrings, e.g. "home_security")
     5. Deduplicate
     6. Drop unrecognized terms
 
+    Step 4 uses word-boundary anchors (whitespace, underscore, hyphen, slash)
+    rather than bare ``in`` to prevent short topics like "ai" from matching
+    inside unrelated words like "email" or "maintain".
+
     The taxonomy size is dynamic (loaded from memory-vocabulary.json at
-    startup). Substring matching iterates CONTROLLED_TOPICS_SORTED, not
-    the set, to guarantee deterministic results across Python restarts.
+    startup). Matching iterates CONTROLLED_TOPICS_SORTED, not the set, to
+    guarantee deterministic results across Python restarts.
     """
     if not topics:
         return []
@@ -559,10 +563,11 @@ def enforce_topics(topics: list[str]) -> list[str]:
                 cleaned.append(mapped)
             continue
 
-        # Try substring match against controlled topics (sorted for determinism)
+        # Try word-boundary match against controlled topics (sorted for determinism).
+        # Use regex \b to prevent "ai" matching inside "email" or "maintain".
         matched = False
         for ct in CONTROLLED_TOPICS_SORTED:
-            if ct in topic:
+            if re.search(r'(?:^|[\s_\-/])' + re.escape(ct) + r'(?:$|[\s_\-/])', topic):
                 if ct not in seen:
                     seen.add(ct)
                     cleaned.append(ct)
@@ -570,9 +575,11 @@ def enforce_topics(topics: list[str]) -> list[str]:
                 break
 
         if not matched:
-            # Try substring match against topic map keys
+            # Try word-boundary match against topic map keys
             for map_key, map_val in TOPIC_MAP.items():
-                if map_key and map_key in topic and map_val is not None:
+                if map_key and map_val is not None and re.search(
+                    r'(?:^|[\s_\-/])' + re.escape(map_key) + r'(?:$|[\s_\-/])', topic
+                ):
                     if map_val not in seen:
                         seen.add(map_val)
                         cleaned.append(map_val)

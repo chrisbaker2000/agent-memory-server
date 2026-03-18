@@ -61,10 +61,13 @@ async def update_task_status(
     started_at: datetime | None = None,
     completed_at: datetime | None = None,
     error_message: str | None = None,
-) -> None:
+) -> bool:
     """Update status and timestamps for an existing Task.
 
-    If the task does not exist, this is a no-op.
+    If the task does not exist, this is a no-op and returns ``False``.
+
+    Returns:
+        True if the update was applied, False if the task was missing or corrupt.
     """
 
     redis = await get_redis_conn()
@@ -72,7 +75,7 @@ async def update_task_status(
     raw = await redis.get(key)
     if raw is None:
         logger.warning("Attempted to update missing task %s", task_id)
-        return
+        return False
 
     if isinstance(raw, bytes):
         raw = raw.decode("utf-8")
@@ -81,7 +84,7 @@ async def update_task_status(
         task = Task.model_validate_json(raw)
     except Exception:
         logger.exception("Failed to decode task JSON for %s during update", task_id)
-        return
+        return False
 
     if status is not None:
         task.status = status
@@ -97,3 +100,4 @@ async def update_task_status(
         task.created_at = datetime.now(UTC)
 
     await redis.set(key, task.model_dump_json(), ex=_TASK_TTL_SECONDS)
+    return True

@@ -75,7 +75,7 @@ class TestMemoryVectorDatabase:
         # Test with empty string
         assert db._parse_list_field("") == []
 
-        # Test with comma-separated string
+        # Test with comma-separated string (legacy fallback when no pipe present)
         assert db._parse_list_field("a,b,c") == ["a", "b", "c"]
 
         # Test with list
@@ -105,7 +105,7 @@ class TestMemoryVectorDatabase:
         assert data["session_id"] == "session-456"
         assert data["user_id"] == "user-789"
         assert data["namespace"] == "test"
-        assert data["topics"] == "testing,memory"
+        assert data["topics"] == "testing|memory"
         assert data["entities"] == "test"
         assert data["memory_type"] == "semantic"
 
@@ -121,7 +121,7 @@ class TestMemoryVectorDatabase:
             "session_id": "session-456",
             "user_id": "user-789",
             "namespace": "test",
-            "topics": "testing,memory",
+            "topics": "testing|memory",
             "entities": "test",
             "memory_type": "semantic",
             "created_at": "1704067200",  # 2024-01-01T00:00:00Z

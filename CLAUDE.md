@@ -153,7 +153,7 @@ OTLP HTTP metrics to SigNoz via `telemetry.py`. Uses `httpx`. Instruments embedd
 
 ### Entity/Topic Quality
 - `clean_entities()`: Stop word removal, URL/path/hex filtering, variant dedup, capped at 30
-- `enforce_topics()`: Controlled topic taxonomy with synonym mapping from `~/.openclaw/config/memory-vocabulary.json` (deterministic longest-first substring matching)
+- `enforce_topics()`: Controlled topic taxonomy with synonym mapping from `~/.openclaw/config/memory-vocabulary.json` (deterministic longest-first word-boundary matching — prevents "ai" matching inside "email")
 
 ## Critical Rules
 

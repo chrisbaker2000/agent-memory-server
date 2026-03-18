@@ -1521,9 +1521,8 @@ async def search_long_term_memories(
                 limit=limit,
                 offset=offset,
             )
-    except Exception:
-        # Best-effort fallback; return the original results on any error
-        pass
+    except Exception as e:
+        logger.warning("Optimized-query fallback search failed: %s", e)
 
     # Debug: Log search output
     memory_previews = [

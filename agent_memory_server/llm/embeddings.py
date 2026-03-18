@@ -153,6 +153,9 @@ class LiteLLMEmbeddings:
         """
         Embed a list of documents.
 
+        For nomic-embed-text (Ollama), prepends "search_document: " to each text
+        for optimal retrieval quality. Other models pass texts unchanged.
+
         Args:
             texts: List of texts to embed.
 
@@ -174,6 +177,7 @@ class LiteLLMEmbeddings:
                     "OpenAI's embedding API rejects empty strings."
                 )
 
+        texts = self._apply_nomic_prefix(texts, task="document")
         kwargs = self._build_call_kwargs(texts)
         response = embedding(**kwargs)
         return [item["embedding"] for item in response.data]
@@ -182,13 +186,19 @@ class LiteLLMEmbeddings:
         """
         Embed a single query text.
 
+        For nomic-embed-text (Ollama), prepends "search_query: " for optimal
+        retrieval quality. Other models pass text unchanged.
+
         Args:
             text: Query text to embed.
 
         Returns:
             Embedding vector.
         """
-        return self.embed_documents([text])[0]
+        prefixed = self._apply_nomic_prefix([text], task="query")
+        kwargs = self._build_call_kwargs(prefixed)
+        response = embedding(**kwargs)
+        return [item["embedding"] for item in response.data][0]
 
     async def aembed_documents(self, texts: list[str]) -> list[list[float]]:
         """
