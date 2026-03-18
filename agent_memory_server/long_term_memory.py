@@ -85,21 +85,31 @@ def _parse_extraction_response_with_fallback(content: str, logger) -> dict:
             f"Initial JSON parsing failed, attempting repair on content: {content[:500]}..."
         )
 
-        # Try to extract just the memories array if it exists
-        memories_match = re.search(r'"memories"\s*:\s*\[(.*?)\]', content, re.DOTALL)
-        if memories_match:
-            try:
-                # Try to reconstruct a valid JSON object
-                memories_json = '{"memories": [' + memories_match.group(1) + "]}"
-                extraction_result = json.loads(memories_json)
-                logger.info("Successfully repaired malformed JSON response")
-                return extraction_result
-            except json.JSONDecodeError:
-                logger.error("JSON repair attempt failed")
-                raise
-        else:
-            logger.error("Could not find memories array in malformed response")
-            raise
+        # Try to extract just the memories array if it exists.
+        # IMPORTANT: greedy (.*) must come first — non-greedy (.*?) truncates
+        # at the first ']' it finds, which breaks when memory text contains
+        # literal brackets like "[1,2,3]".  Greedy captures through nested
+        # brackets to the LAST ']', which is correct for the outer array.
+        # If the greedy capture produces invalid JSON (extra trailing content),
+        # we fall back to non-greedy as a last resort.
+        for pattern in [
+            r'"memories"\s*:\s*\[(.*)\]',   # greedy — handles nested brackets
+            r'"memories"\s*:\s*\[(.*?)\]',  # non-greedy — last resort
+        ]:
+            memories_match = re.search(pattern, content, re.DOTALL)
+            if memories_match:
+                try:
+                    # Try to reconstruct a valid JSON object
+                    memories_json = '{"memories": [' + memories_match.group(1) + "]}"
+                    extraction_result = json.loads(memories_json)
+                    logger.info("Successfully repaired malformed JSON response")
+                    return extraction_result
+                except json.JSONDecodeError:
+                    continue  # Try next pattern
+
+        # All repair attempts failed
+        logger.error("JSON repair attempt failed — no pattern matched or parsed")
+        raise json.JSONDecodeError("All repair attempts failed", content, 0)
 
 
 # Prompt for extracting memories from messages in working memory context
@@ -1251,15 +1261,19 @@ async def index_long_term_memories(
 
         # "User" text guard: reject memories that use "User" as a person name.
         # This catches all extraction paths that fail to resolve the actual name.
-        # Pattern: text starts with "User " (after optional tag) or sentence
-        # starts with "User " followed by a verb — indicates the LLM used "User"
-        # as a person reference instead of an actual name.
+        # Two patterns:
+        # 1. Text starts with "User <verb>" (after optional tag)
+        # 2. "User <verb>" appears anywhere in the text as a mid-sentence person
+        #    reference (e.g., "On March 14, User asked...")
         _stripped = re.sub(r"^\[.*?\]\s*", "", memory.text)
-        if re.match(r"^User\s+(?:is|was|has|had|does|did|prefers|likes|wants|"
-                     r"mentioned|asked|enjoys|works|lives|loves|needs|feels|"
-                     r"believes|thinks|participates|uses|values|gave|ordered|"
-                     r"bought|tends|keeps|expressed|currently|also|recently)\b",
-                     _stripped):
+        _user_verb_pattern = (
+            r"(?:^|[,.]\s+)User\s+(?:is|was|has|had|does|did|prefers|likes|wants|"
+            r"mentioned|asked|enjoys|works|lives|loves|needs|feels|"
+            r"believes|thinks|participates|uses|values|gave|ordered|"
+            r"bought|tends|keeps|expressed|currently|also|recently|"
+            r"reported|said|told|requested|inquired|checked|noted)\b"
+        )
+        if re.search(_user_verb_pattern, _stripped):
             logger.warning(
                 f"Rejecting memory with 'User' as person reference "
                 f"(source_user={getattr(memory, 'source_user', None)}): "

@@ -31,7 +31,7 @@ A fork of [redis/agent-memory-server](https://github.com/redis/agent-memory-serv
 
 5. **Merge pipeline** (`long_term_memory.py`) — `merge_memories_with_llm()` propagates attribution. Visibility uses `VISIBILITY_RANK` most-restrictive-wins. Refuses to merge memories with different `source_user` values. Size guards (`MAX_MEMORY_INPUT_CHARS=500`, `MAX_MEMORY_OUTPUT_CHARS=1000`, `MAX_ENTITY_COUNT=30`) prevent mega-memory creation.
 
-6. **Extraction pipeline** (`extraction.py`) — `_resolve_parent_attribution()` copies parent's attribution to child memories. `clean_entities()` quality-filters entities (stop words, URLs, hex IDs, variant dedup). `enforce_topics()` enforces 19-topic controlled vocabulary with synonym mapping. Vocabulary loaded from `~/.openclaw/config/memory-vocabulary.json`.
+6. **Extraction pipeline** (`extraction.py`) — `_resolve_parent_attribution()` copies parent's attribution to child memories. `clean_entities()` quality-filters entities (stop words, URLs, hex IDs, variant dedup). `enforce_topics()` enforces controlled vocabulary with synonym mapping and deterministic longest-first substring matching. Vocabulary loaded from `~/.openclaw/config/memory-vocabulary.json`.
 
 7. **Forgetting pipeline** (`long_term_memory.py`) — `select_ids_for_forgetting()` checks `stale_after` and deletes expired memories (pinned exempt). Configurable via `stale_after_cleanup_enabled`.
 
@@ -39,7 +39,7 @@ A fork of [redis/agent-memory-server](https://github.com/redis/agent-memory-serv
 
 9. **Safety defaults** (`config.py`) — Semantic dedup disabled (`semantic_dedup_enabled=False`, `deduplication_distance_threshold=0.0`). Automatic compaction disabled (`compaction_every_minutes=0`). Hash-based dedup remains active.
 
-10. **Telemetry** (`telemetry.py`, `main.py`, `llm/embeddings.py`) — OTLP HTTP metrics to SigNoz (localhost:4318). Instruments embedding calls, search operations, memory store. 30s flush interval. Uses `httpx` (declared dependency).
+10. **Telemetry** (`telemetry.py`, `main.py`, `llm/embeddings.py`) — OTLP HTTP metrics to SigNoz (localhost:4318). Instruments embedding calls, search operations, memory store. 30s flush interval, non-blocking (HTTP happens outside the buffer lock). Uses `httpx` (declared dependency).
 
 11. **Nomic embedding prefixes** (`llm/embeddings.py`) — `aembed_documents()` prepends "search_document: " and `aembed_query()` prepends "search_query: " for nomic-embed-text models. No-op for other models.
 

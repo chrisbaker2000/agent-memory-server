@@ -190,6 +190,12 @@ def resolve_user_from_session_id(session_id: str | None) -> str | None:
     if "channel" in parts:
         return "chris"
 
+    # Fallback: local/main sessions (e.g., "agent:main:main") and system sessions
+    # (e.g., "agent:main:hook:email:"). These have no peer ID or channel scope.
+    # Default to "chris" — the primary (and only direct) user of the local gateway.
+    if "main" in parts or "hook" in parts:
+        return "chris"
+
     return None
 
 
@@ -210,7 +216,9 @@ ENTITY_STOP_WORDS: set[str] = set(_vocab.get("entity_stop_words", [
 _limits = _vocab.get("limits", {})
 MAX_ENTITY_COUNT = _limits.get("max_entity_count", 30)
 
-# Controlled topic vocabulary — loaded from shared config
+# Controlled topic vocabulary — loaded from shared config.
+# Stored as a set for O(1) lookup, with a sorted list for deterministic
+# iteration in substring matching (set iteration order is non-deterministic).
 CONTROLLED_TOPICS: set[str] = set(_vocab.get("controlled_topics", [
     "family", "health", "education", "heritage",
     "home", "food", "travel", "entertainment", "sports", "media", "collecting",
@@ -218,6 +226,9 @@ CONTROLLED_TOPICS: set[str] = set(_vocab.get("controlled_topics", [
     "openclaw", "infrastructure", "analytics",
     "communication", "documents", "security",
 ]))
+# Sort longest-first so "infrastructure" matches before "infra" substring,
+# and deterministic across Python restarts (sets have non-deterministic order).
+CONTROLLED_TOPICS_SORTED: list[str] = sorted(CONTROLLED_TOPICS, key=lambda t: (-len(t), t))
 
 # Map common off-vocabulary terms to controlled topics (or None to drop)
 _raw_topic_map = _vocab.get("topic_map", {})
@@ -506,13 +517,17 @@ def enforce_topics(topics: list[str]) -> list[str]:
     Enforce the controlled topic vocabulary on a list of topics.
 
     1. Lowercase and strip
-    2. Map known synonyms to controlled terms
-    3. Drop terms not in controlled vocabulary
-    4. Deduplicate
-    5. Return cleaned list
+    2. Direct match against CONTROLLED_TOPICS (O(1) set lookup)
+    3. Map known synonyms via TOPIC_MAP
+    4. Substring match against CONTROLLED_TOPICS_SORTED (longest-first
+       for deterministic resolution when a topic contains multiple
+       controlled-topic substrings, e.g. "home_security")
+    5. Deduplicate
+    6. Drop unrecognized terms
 
-    This ensures all topics stored in the memory system come from the
-    19-topic taxonomy, whether extracted by LLM, BERT, or set manually.
+    The taxonomy size is dynamic (loaded from memory-vocabulary.json at
+    startup). Substring matching iterates CONTROLLED_TOPICS_SORTED, not
+    the set, to guarantee deterministic results across Python restarts.
     """
     if not topics:
         return []
@@ -544,9 +559,9 @@ def enforce_topics(topics: list[str]) -> list[str]:
                 cleaned.append(mapped)
             continue
 
-        # Try substring match against controlled topics
+        # Try substring match against controlled topics (sorted for determinism)
         matched = False
-        for ct in CONTROLLED_TOPICS:
+        for ct in CONTROLLED_TOPICS_SORTED:
             if ct in topic:
                 if ct not in seen:
                     seen.add(ct)

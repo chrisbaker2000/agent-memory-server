@@ -149,11 +149,11 @@ Both `extraction.py` and `long_term_memory.py` import this — never define inli
 - **Size guards**: `MAX_MEMORY_INPUT_CHARS=500`, `MAX_MEMORY_OUTPUT_CHARS=1000`, `MAX_ENTITY_COUNT=30`.
 
 ### Telemetry
-OTLP HTTP metrics to SigNoz via `telemetry.py`. Uses `httpx`. Instruments embeddings, search, and store operations. Prefix: `memory_server.*`. Flush interval: 30s.
+OTLP HTTP metrics to SigNoz via `telemetry.py`. Uses `httpx`. Instruments embeddings, search, and store operations. Prefix: `memory_server.*`. Flush interval: 30s. Non-blocking — buffer is drained under lock but the HTTP POST happens outside the lock so callers of `record_metric()` are never stalled by a slow OTLP endpoint.
 
 ### Entity/Topic Quality
 - `clean_entities()`: Stop word removal, URL/path/hex filtering, variant dedup, capped at 30
-- `enforce_topics()`: Controlled 19-topic taxonomy with synonym mapping from `~/.openclaw/config/memory-vocabulary.json`
+- `enforce_topics()`: Controlled topic taxonomy with synonym mapping from `~/.openclaw/config/memory-vocabulary.json` (deterministic longest-first substring matching)
 
 ## Critical Rules
 
@@ -246,7 +246,7 @@ agent_memory_server/
 - **RedisVL Integration**: All search operations use RedisVL query builders
 
 ### 3. AI Integration
-- **Topic Modeling**: LLM-based extraction enforced to controlled 19-topic vocabulary
+- **Topic Modeling**: LLM-based extraction enforced to controlled topic vocabulary (loaded from config)
 - **Entity Recognition**: LLM-based with quality filtering (stop words, dedup, cap at 30)
 - **Summarization**: Conversation summarization when context window exceeded
 - **Multi-LLM Support**: OpenAI, Anthropic, Ollama, and other LiteLLM providers

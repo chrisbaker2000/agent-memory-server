@@ -13,6 +13,12 @@ Instrumented operations:
 All metrics use the "memory_server." prefix to distinguish from the
 external metrics-collector's "memory." prefix metrics.
 
+Threading model:
+  Metrics are appended to _metric_buffer under _buffer_lock, then the
+  buffer is drained (still under lock) into a local list.  The HTTP POST
+  to the OTLP endpoint happens OUTSIDE the lock so that a slow or
+  unresponsive SigNoz endpoint never blocks callers of record_metric().
+
 Usage:
     from agent_memory_server.telemetry import record_metric, record_histogram
 
@@ -94,7 +100,10 @@ def record_metric(
 ) -> None:
     """Record a gauge metric data point.
 
-    Buffered and flushed every FLUSH_INTERVAL seconds.
+    Buffered and flushed every FLUSH_INTERVAL seconds.  If the buffer
+    reaches MAX_BUFFER_SIZE, it is drained and sent inline, but the
+    HTTP call happens outside the lock so concurrent callers are not
+    blocked.
     """
     if not TELEMETRY_ENABLED:
         return
@@ -114,10 +123,14 @@ def record_metric(
         },
     }
 
+    overflow_metrics = None
     with _buffer_lock:
         _metric_buffer.append(metric)
         if len(_metric_buffer) >= MAX_BUFFER_SIZE:
-            _flush_locked()
+            overflow_metrics = _drain_buffer_locked()
+    # HTTP call happens OUTSIDE the lock — never blocks other threads
+    if overflow_metrics:
+        _send_metrics(overflow_metrics)
 
 
 def record_histogram(
@@ -185,15 +198,29 @@ def record_counter(
         _metric_buffer.append(metric)
 
 
-def _flush_locked() -> None:
-    """Flush buffered metrics to OTLP endpoint. Must hold _buffer_lock."""
+def _drain_buffer_locked() -> list[dict]:
+    """Drain buffered metrics under lock. Returns the metrics list.
+
+    Must be called while holding _buffer_lock. Does NOT do any I/O.
+    """
     if not _metric_buffer:
-        return
+        return []
 
     metrics = list(_metric_buffer)
     _metric_buffer.clear()
+    return metrics
 
-    # Release lock before HTTP call
+
+def _send_metrics(metrics: list[dict]) -> None:
+    """Send pre-drained metrics to OTLP endpoint via HTTP.
+
+    Must be called WITHOUT holding _buffer_lock — this function performs
+    a synchronous HTTP POST that may block for up to 5 seconds on timeout.
+    Errors are debug-logged, never raised.
+    """
+    if not metrics:
+        return
+
     payload = {
         "resourceMetrics": [
             {
@@ -233,7 +260,9 @@ def _flush_locked() -> None:
 def flush() -> None:
     """Manually flush buffered metrics."""
     with _buffer_lock:
-        _flush_locked()
+        metrics = _drain_buffer_locked()
+    # HTTP call happens OUTSIDE the lock
+    _send_metrics(metrics)
 
 
 def _flush_loop() -> None:
@@ -242,7 +271,9 @@ def _flush_loop() -> None:
     while _running:
         time.sleep(FLUSH_INTERVAL)
         with _buffer_lock:
-            _flush_locked()
+            metrics = _drain_buffer_locked()
+        # HTTP call happens OUTSIDE the lock
+        _send_metrics(metrics)
 
 
 def start() -> None:
