@@ -807,7 +807,8 @@ async def search_long_term_memory(
 
         raw_results.memories = ranked
         return raw_results
-    except Exception:
+    except Exception as e:
+        logger.warning("Recency reranking failed, returning unranked results: %s", e)
         return raw_results
 
 
@@ -888,11 +889,14 @@ async def update_long_term_memory(
     current_user: UserInfo = Depends(get_current_user),
 ):
     """
-    Update a long-term memory by its ID
+    Update a long-term memory by its ID.
+
+    Fields can be set to None to clear them (e.g., event_date, stale_after).
+    Only fields included in the request body are modified; omitted fields are unchanged.
 
     Args:
         memory_id: The ID of the memory to update
-        updates: The fields to update
+        updates: The fields to update (only provided fields are applied)
 
     Returns:
         The updated memory record
@@ -903,8 +907,10 @@ async def update_long_term_memory(
     if not settings.long_term_memory:
         raise HTTPException(status_code=400, detail="Long-term memory is disabled")
 
-    # Convert request model to dictionary, excluding None values
-    update_dict = {k: v for k, v in updates.model_dump().items() if v is not None}
+    # Use exclude_unset=True to distinguish "field not provided" from
+    # "field explicitly set to None" (e.g., clearing event_date or stale_after).
+    # The old approach (filtering v is not None) made it impossible to clear fields.
+    update_dict = updates.model_dump(exclude_unset=True)
 
     if not update_dict:
         raise HTTPException(status_code=400, detail="No fields provided for update")

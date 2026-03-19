@@ -190,7 +190,7 @@ class DiscreteMemoryStrategy(BaseMemoryStrategy):
                 except json.JSONDecodeError:
                     logger.error(f"Error decoding JSON: {response.content}")
                     raise
-        return None
+        return []
 
     def get_extraction_description(self) -> str:
         """Get description of discrete memory extraction strategy."""
@@ -288,7 +288,7 @@ class SummaryMemoryStrategy(BaseMemoryStrategy):
                 except json.JSONDecodeError:
                     logger.error(f"Error decoding JSON: {response.content}")
                     raise
-        return None
+        return []
 
     def get_extraction_description(self) -> str:
         """Get description of summary extraction strategy."""
@@ -387,7 +387,7 @@ class UserPreferencesMemoryStrategy(BaseMemoryStrategy):
                 except json.JSONDecodeError:
                     logger.error(f"Error decoding JSON: {response.content}")
                     raise
-        return None
+        return []
 
     def get_extraction_description(self) -> str:
         """Get description of user preferences extraction strategy."""
@@ -489,7 +489,7 @@ class CustomMemoryStrategy(BaseMemoryStrategy):
                 except json.JSONDecodeError:
                     logger.error(f"Error decoding JSON: {response.content}")
                     raise
-        return None
+        return []
 
     def _validate_memory_output(self, memory: dict[str, Any]) -> bool:
         """Validate a memory object for security issues."""

@@ -338,6 +338,9 @@ async def extract_entities_llm(text: str) -> list[str]:
     """
     Extract named entities from text using an LLM.
 
+    Retries up to 3 times on JSON parse failure or empty results.
+    Returns [] if all attempts are exhausted.
+
     Args:
         text: The text to extract entities from
 
@@ -354,20 +357,23 @@ Example: {{"entities": ["John Smith", "Apple Inc.", "New York"]}}
 """
     entities: list[str] = []
 
-    async for attempt in AsyncRetrying(stop=stop_after_attempt(3)):
-        with attempt:
-            response = await LLMClient.create_chat_completion(
-                model=settings.fast_model,
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
-            )
-            try:
-                entities = json.loads(response.content).get("entities", [])
-            except (json.JSONDecodeError, KeyError):
-                logger.error(f"Error decoding NER JSON: {response.content}")
-                entities = []
-            if entities:
-                break
+    try:
+        async for attempt in AsyncRetrying(stop=stop_after_attempt(3)):
+            with attempt:
+                response = await LLMClient.create_chat_completion(
+                    model=settings.fast_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    response_format={"type": "json_object"},
+                )
+                # Let JSONDecodeError propagate so tenacity retries.
+                # The old code caught it and returned [], preventing retries.
+                parsed = json.loads(response.content)
+                entities = parsed.get("entities", [])
+                if not entities:
+                    raise ValueError("LLM returned empty entities list")
+    except Exception:
+        # All retries exhausted — return whatever we have (likely [])
+        logger.warning("Entity extraction failed after 3 attempts for text: %s...", text[:80])
 
     return list(set(entities))  # Remove duplicates
 
@@ -379,7 +385,8 @@ async def extract_topics_llm(
     """
     Extract topics from text using an LLM.
 
-    Uses settings.fast_model for efficient extraction.
+    Retries up to 3 times on JSON parse failure or empty results.
+    Returns [] if all attempts are exhausted. Uses settings.fast_model.
     """
     _num_topics = num_topics if num_topics is not None else settings.top_k_topics
 
@@ -393,21 +400,23 @@ Example: {{"topics": ["machine learning", "data science", "python"]}}
 """
     topics: list[str] = []
 
-    async for attempt in AsyncRetrying(stop=stop_after_attempt(3)):
-        with attempt:
-            response = await LLMClient.create_chat_completion(
-                model=settings.fast_model,
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
-            )
-            try:
-                topics = json.loads(response.content).get("topics", [])
-            except (json.JSONDecodeError, KeyError):
-                logger.error(f"Error decoding topics JSON: {response.content}")
-                topics = []
-            if topics:
+    try:
+        async for attempt in AsyncRetrying(stop=stop_after_attempt(3)):
+            with attempt:
+                response = await LLMClient.create_chat_completion(
+                    model=settings.fast_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    response_format={"type": "json_object"},
+                )
+                # Let JSONDecodeError propagate so tenacity retries.
+                parsed = json.loads(response.content)
+                topics = parsed.get("topics", [])
+                if not topics:
+                    raise ValueError("LLM returned empty topics list")
                 topics = topics[:_num_topics]
-                break
+    except Exception:
+        # All retries exhausted — return whatever we have (likely [])
+        logger.warning("Topic extraction failed after 3 attempts for text: %s...", text[:80])
 
     return topics
 
@@ -779,9 +788,12 @@ async def extract_memories_with_strategy(
             await db.delete_memories([memory.id])
             continue
 
+        # JSON-serialize config for a hashable group key. The old approach
+        # tuple(sorted(config.items())) crashes with TypeError when config
+        # values contain nested dicts or lists (unhashable types).
         strategy_key = (
             memory.extraction_strategy,
-            tuple(sorted(memory.extraction_strategy_config.items())),
+            json.dumps(memory.extraction_strategy_config, sort_keys=True),
         )
         if strategy_key not in strategy_groups:
             strategy_groups[strategy_key] = []
@@ -791,13 +803,13 @@ async def extract_memories_with_strategy(
     all_updated_memories = []
 
     # Process each strategy group
-    for (strategy_name, config_items), strategy_memories in strategy_groups.items():
+    for (strategy_name, config_json), strategy_memories in strategy_groups.items():
         logger.info(
             f"Processing {len(strategy_memories)} memories with strategy: {strategy_name}"
         )
 
-        # Get strategy instance
-        config_dict = dict(config_items)
+        # Get strategy instance — deserialize the JSON config key back to dict
+        config_dict = json.loads(config_json)
         try:
             strategy = get_memory_strategy(strategy_name, **config_dict)
         except ValueError as e:

@@ -163,8 +163,13 @@ def record_histogram(
         },
     }
 
+    overflow_metrics = None
     with _buffer_lock:
         _metric_buffer.append(metric)
+        if len(_metric_buffer) >= MAX_BUFFER_SIZE:
+            overflow_metrics = _drain_buffer_locked()
+    if overflow_metrics:
+        _send_metrics(overflow_metrics)
 
 
 def record_counter(
@@ -194,8 +199,13 @@ def record_counter(
         },
     }
 
+    overflow_metrics = None
     with _buffer_lock:
         _metric_buffer.append(metric)
+        if len(_metric_buffer) >= MAX_BUFFER_SIZE:
+            overflow_metrics = _drain_buffer_locked()
+    if overflow_metrics:
+        _send_metrics(overflow_metrics)
 
 
 def _drain_buffer_locked() -> list[dict]:

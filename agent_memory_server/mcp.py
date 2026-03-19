@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import ulid
@@ -288,9 +288,9 @@ async def get_current_datetime() -> dict[str, str | int]:
            - Update text to include a grounded, human-readable date
              (e.g., "User was promoted to Principal Engineer on August 14, 2025.")
     """
-    now = datetime.utcnow()
+    now = datetime.now(UTC)
     # Produce a Z-suffixed ISO 8601 string
-    iso_utc = now.replace(microsecond=0).isoformat() + "Z"
+    iso_utc = now.replace(microsecond=0).isoformat().replace("+00:00", "Z")
     return {"iso_utc": iso_utc, "unix_ts": int(now.timestamp())}
 
 

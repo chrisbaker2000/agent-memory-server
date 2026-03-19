@@ -918,23 +918,24 @@ async def compact_long_term_memories(
                             # and delete the rest
                             memories_to_delete = []
 
-                            # Each memory result has: key + 6 field-value pairs = 13 elements
-                            # Keys are at positions: 1, 14, 27, ... (1 + n * 13)
-                            elements_per_memory = 1 + 6 * 2  # key + 6 field-value pairs
-                            for n in range(num_duplicates):
-                                key_index = 1 + n * elements_per_memory
-                                # Skip the last item (newest) which we'll keep
-                                if n < num_duplicates - 1 and key_index < len(
-                                    search_results
-                                ):
-                                    key = search_results[key_index]
-                                    if key is not None:
-                                        key_str = (
-                                            key.decode()
-                                            if isinstance(key, bytes)
-                                            else key
-                                        )
-                                        memories_to_delete.append(key_str)
+                            # Parse FT.SEARCH results by scanning for keys
+                            # with the expected prefix, rather than assuming a
+                            # fixed stride. Records may have variable field
+                            # counts if a hash is missing a field.
+                            key_prefix = settings.redisvl_index_prefix + ":"
+                            all_keys = []
+                            for elem in search_results[1:]:
+                                elem_str = (
+                                    elem.decode()
+                                    if isinstance(elem, bytes)
+                                    else str(elem) if elem is not None else ""
+                                )
+                                if elem_str.startswith(key_prefix):
+                                    all_keys.append(elem_str)
+
+                            # Delete all but the last (newest, since sorted ASC)
+                            for key_str in all_keys[:-1]:
+                                memories_to_delete.append(key_str)
 
                             # Delete older duplicates
                             if memories_to_delete:

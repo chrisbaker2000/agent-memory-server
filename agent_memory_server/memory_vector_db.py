@@ -664,7 +664,7 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
                 # Build data dicts with embeddings
                 data_list = []
                 memory_ids = []
-                for memory, embedding in zip(memories, embeddings, strict=False):
+                for memory, embedding in zip(memories, embeddings, strict=True):
                     data = self._memory_to_data(memory)
                     data["vector"] = np.array(embedding, dtype=np.float32).tobytes()
                     data_list.append(data)
