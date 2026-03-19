@@ -328,8 +328,11 @@ def start() -> None:
 
 
 def stop() -> None:
-    """Stop the background flush thread, join it, flush remaining metrics,
-    and close the persistent HTTP client."""
+    """Stop the background flush thread, flush remaining metrics, and close the HTTP client.
+
+    Blocks up to 5s waiting for the flush thread to complete its current cycle.
+    If the OTLP endpoint is slow/unreachable, this may delay shutdown.
+    """
     global _running, _flush_thread, _client
     _running = False
     # Wait for the flush thread to finish its current cycle
