@@ -64,13 +64,14 @@ RESOURCE_ATTRS = [
 ]
 
 # ---------------------------------------------------------------------------
-# Metric buffer and flush thread
+# Metric buffer, flush thread, and persistent HTTP client
 # ---------------------------------------------------------------------------
 
 _metric_buffer: list[dict] = []
 _buffer_lock = threading.Lock()
 _flush_thread: threading.Thread | None = None
 _running = False
+_client: Any = None  # httpx.Client — created in start(), closed in stop()
 
 
 def _now_ns() -> str:
@@ -227,7 +228,12 @@ def _send_metrics(metrics: list[dict]) -> None:
     Must be called WITHOUT holding _buffer_lock — this function performs
     a synchronous HTTP POST that may block for up to 5 seconds on timeout.
     Errors are debug-logged, never raised.
+
+    Reuses the persistent _client created in start(). Falls back to
+    creating a one-shot client if start() hasn't been called (e.g.,
+    overflow flush before start).
     """
+    global _client
     if not metrics:
         return
 
@@ -251,7 +257,14 @@ def _send_metrics(metrics: list[dict]) -> None:
     try:
         import httpx
 
-        with httpx.Client(timeout=5) as client:
+        client = _client
+        close_after = False
+        if client is None:
+            # Fallback: no persistent client yet (overflow before start())
+            client = httpx.Client(timeout=5)
+            close_after = True
+
+        try:
             resp = client.post(
                 OTLP_ENDPOINT,
                 json=payload,
@@ -263,6 +276,9 @@ def _send_metrics(metrics: list[dict]) -> None:
                     resp.status_code,
                     resp.text[:200],
                 )
+        finally:
+            if close_after:
+                client.close()
     except Exception as e:
         logger.debug("Telemetry flush error: %s", e)
 
@@ -287,23 +303,48 @@ def _flush_loop() -> None:
 
 
 def start() -> None:
-    """Start the background flush thread."""
-    global _flush_thread, _running
+    """Start the background flush thread and create the persistent HTTP client.
+
+    Guards the check-and-set of _running with _buffer_lock to prevent
+    TOCTOU races from concurrent start() calls.
+    """
+    global _flush_thread, _running, _client
     if not TELEMETRY_ENABLED:
         return
-    if _running:
-        return
-    _running = True
+    with _buffer_lock:
+        if _running:
+            return
+        _running = True
+    try:
+        import httpx
+
+        _client = httpx.Client(timeout=5)
+    except Exception as e:
+        logger.debug("Failed to create httpx client: %s", e)
+        _client = None
     _flush_thread = threading.Thread(target=_flush_loop, daemon=True, name="telemetry-flush")
     _flush_thread.start()
     logger.info("Memory server telemetry started (endpoint: %s)", OTLP_ENDPOINT)
 
 
 def stop() -> None:
-    """Stop the background flush thread and flush remaining metrics."""
-    global _running
+    """Stop the background flush thread, join it, flush remaining metrics,
+    and close the persistent HTTP client."""
+    global _running, _flush_thread, _client
     _running = False
+    # Wait for the flush thread to finish its current cycle
+    if _flush_thread is not None:
+        _flush_thread.join(timeout=5)
+        _flush_thread = None
+    # Flush any remaining buffered metrics
     flush()
+    # Close the persistent HTTP client
+    if _client is not None:
+        try:
+            _client.close()
+        except Exception:
+            pass
+        _client = None
     logger.info("Memory server telemetry stopped")
 
 
