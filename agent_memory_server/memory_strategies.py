@@ -52,7 +52,8 @@ class BaseMemoryStrategy(ABC):
                 Falls back to "User" when None.
 
         Returns:
-            List of memory dictionaries with keys: type, text, topics, entities
+            List of memory dictionaries with keys: type, text, topics, entities.
+            Returns [] (never None) if all retry attempts are exhausted.
         """
         pass
 
