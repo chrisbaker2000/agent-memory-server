@@ -33,17 +33,46 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
 def _load_vocabulary() -> dict:
-    """Load vocabulary from shared config. Falls back to minimal inline defaults."""
+    """Load vocabulary from shared config. Falls back to minimal inline defaults.
+
+    Supports two vocabulary file formats:
+    1. Flat format: { "controlled_topics": [...], "topic_map": {...} }
+    2. Structured format: { "topics": { "name": { "synonyms": [...] } } }
+       (used by Finley's gateway-side vocabulary system)
+
+    Format 2 is automatically converted to format 1 for compatibility.
+    """
     vocab_path = os.path.expanduser(settings.vocabulary_path)
     try:
         with open(vocab_path) as f:
             vocab = json.load(f)
-            logger.info(
-                "Loaded vocabulary from %s: %d topics, %d mappings",
-                vocab_path,
-                len(vocab.get("controlled_topics", [])),
-                len(vocab.get("topic_map", {})),
-            )
+
+            # Auto-convert structured format → flat format
+            if "topics" in vocab and isinstance(vocab["topics"], dict) and "controlled_topics" not in vocab:
+                topics_dict = vocab["topics"]
+                controlled = list(topics_dict.keys())
+                topic_map: dict[str, str] = {}
+                for topic_name, topic_def in topics_dict.items():
+                    if isinstance(topic_def, dict):
+                        for synonym in topic_def.get("synonyms", []):
+                            syn_lower = synonym.lower().strip()
+                            if syn_lower and syn_lower != topic_name:
+                                topic_map[syn_lower] = topic_name
+                vocab["controlled_topics"] = controlled
+                vocab["topic_map"] = topic_map
+                logger.info(
+                    "Loaded vocabulary from %s (structured format): %d topics, %d synonyms",
+                    vocab_path,
+                    len(controlled),
+                    len(topic_map),
+                )
+            else:
+                logger.info(
+                    "Loaded vocabulary from %s: %d topics, %d mappings",
+                    vocab_path,
+                    len(vocab.get("controlled_topics", [])),
+                    len(vocab.get("topic_map", {})),
+                )
             return vocab
     except FileNotFoundError:
         logger.warning(
