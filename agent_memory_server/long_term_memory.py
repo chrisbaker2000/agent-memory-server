@@ -596,6 +596,14 @@ async def extract_memory_structure(
     merged_topics = enforce_topics(merged_topics)
     merged_entities = clean_entities(merged_entities)
 
+    # Safety guard: never overwrite existing good topics/entities with empty results.
+    # If the memory already had topics and the merge produced nothing (e.g., LLM
+    # extraction failed or enforce_topics dropped everything), keep the originals.
+    if not merged_topics and memory.topics:
+        merged_topics = enforce_topics(memory.topics)
+    if not merged_entities and memory.entities:
+        merged_entities = clean_entities(memory.entities)
+
     # Convert lists to pipe-separated strings for TAG fields
     # Issue #156 fix: langchain-redis uses pipe (|) as the default TAG separator
     topics_joined = "|".join(merged_topics) if merged_topics else ""
@@ -1355,8 +1363,20 @@ async def index_long_term_memories(
         logger.error(f"Error indexing memories: {e}")
         raise
 
-    # Schedule background tasks for topic/entity extraction
+    # Schedule background tasks for topic/entity extraction.
+    # Skip memories that already have topics AND entities populated —
+    # callers like Finley's slack-scanner pre-normalize these fields
+    # and background re-extraction would overwrite them with lower-quality
+    # LLM-generated alternatives.
     for memory in processed_memories:
+        has_topics = memory.topics and len(memory.topics) > 0
+        has_entities = memory.entities and len(memory.entities) > 0
+        if has_topics and has_entities:
+            logger.debug(
+                f"Skipping extract_memory_structure for {memory.id} — "
+                f"already has {len(memory.topics)} topics + {len(memory.entities)} entities"
+            )
+            continue
         background_tasks.add_task(extract_memory_structure, memory)
 
     if settings.enable_discrete_memory_extraction:
