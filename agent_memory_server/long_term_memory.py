@@ -617,12 +617,14 @@ async def extract_memory_structure(
 
 async def merge_memories_with_llm(
     memories: list[MemoryRecord],
-) -> MemoryRecord:
+) -> MemoryRecord | None:
     """
     Use an LLM to merge similar or duplicate memories.
 
     Args:
         memories: List of MemoryRecord objects to merge
+
+    Returns None if the LLM returns empty content (caller should keep originals).
 
     Returns:
         A merged memory
@@ -676,8 +678,11 @@ Merged memory:"""
         messages=[{"role": "user", "content": prompt}],
     )
 
-    # Extract the merged content
-    merged_text = response.content or ""
+    # Extract the merged content — reject empty LLM responses
+    merged_text = (response.content or "").strip()
+    if not merged_text:
+        logger.warning("LLM returned empty merge response, refusing to create empty memory")
+        return None
 
     def coerce_to_float(m: MemoryRecord, key: str) -> float:
         try:
@@ -1142,7 +1147,8 @@ _NOISE_META_MEMORY = re.compile(
 )
 
 _NOISE_ANALYTICS_SCHEMA = re.compile(
-    r"(?:table|schema).*(?:column|partition(?:ed)?|cluster(?:ed)?|BigQuery|Dataform)|"
+    r"(?:BigQuery|Dataform).*(?:table|column|schema|partition)|"
+    r"(?:table|schema).*(?:partition(?:ed)?|cluster(?:ed)?|BigQuery|Dataform)|"
     r"(?:jitsu_events|google_ads|facebook_capi|meta_ads|mailcoach|marketing_funnel|"
     r"email_deliverability|property_listing|all_internal|users_unified).*"
     r"(?:table|column|schema|partition|affected|complex|optimization|source.*dependenc)|"
@@ -1158,7 +1164,8 @@ _NOISE_MONITORING = re.compile(
     r"no (?:activity|events?) (?:found|detected|recorded)|"
     r"no raw.scanner|no individual file|"
     r"(?:PDF|document|file) renamed from (?:scan_|document_)|"
-    r"all services healthy|backup completed successfully",
+    r"all (?:docker |homelab )?services (?:are )?healthy(?!\s*\w)|"
+    r"^backup completed successfully$",
     re.IGNORECASE,
 )
 
@@ -1233,8 +1240,10 @@ async def index_long_term_memories(
         # MAX_MEMORY_OUTPUT_CHARS (1000) is the maximum allowed text length.
         # This catches all write paths: API, manager, extraction, promotion, plugin.
         # Oversized text is truncated at the last sentence boundary within the limit.
+        # Work on a shallow copy so callers' MemoryRecord objects are not mutated.
         text_len = len(memory.text)
         if text_len > MAX_MEMORY_OUTPUT_CHARS:
+            memory = memory.model_copy()
             truncated = memory.text[:MAX_MEMORY_OUTPUT_CHARS]
             # Try to truncate at a sentence boundary for cleaner text
             last_period = truncated.rfind(". ")
@@ -1255,6 +1264,7 @@ async def index_long_term_memories(
         # "2026-02-22" in the NUMERIC event_date field, causing Redis Search to
         # silently exclude the record from the index (orphan key).
         if memory.event_date is not None and not isinstance(memory.event_date, datetime):
+            memory = memory.model_copy()
             try:
                 memory.event_date = datetime.fromisoformat(str(memory.event_date))
                 logger.warning(

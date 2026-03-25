@@ -54,7 +54,14 @@ class TagFilter(BaseModel):
         if self.any is not None:
             return Tag(self.field) == self.any
         if self.all is not None:
-            return Tag(self.field) == self.all
+            # AND semantics: every tag must be present. Build an intersection
+            # of individual Tag == value filters. RedisVL's Tag == list is OR;
+            # we need the conjunction of each single-value match.
+            filters = [Tag(self.field) == val for val in self.all]
+            result = filters[0]
+            for f in filters[1:]:
+                result = result & f
+            return result
         raise ValueError("No filter provided")
 
 
@@ -113,7 +120,11 @@ class EnumFilter(BaseModel):
         if self.any is not None:
             return Tag(self.field) == self.any
         if self.all is not None:
-            return Tag(self.field) == self.all
+            filters = [Tag(self.field) == val for val in self.all]
+            result = filters[0]
+            for f in filters[1:]:
+                result = result & f
+            return result
         raise ValueError("No filter provided")
 
 

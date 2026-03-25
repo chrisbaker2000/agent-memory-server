@@ -453,6 +453,7 @@ Example: {{"topics": ["machine learning", "data science", "python"]}}
 def clean_entities(entities: list[str]) -> list[str]:
     """
     Quality-filter an entity list:
+      0. Filter non-string values (LLM may return null/int/dict in entity lists)
       1. Strip whitespace and empty strings
       2. Remove single-word common English stop words
       3. Deduplicate variants (keep most specific form)
@@ -468,6 +469,8 @@ def clean_entities(entities: list[str]) -> list[str]:
     seen_lower: set[str] = set()
 
     for entity in entities:
+        if not isinstance(entity, str):
+            continue
         entity = entity.strip().strip('"\'[]{}')
         if not entity:
             continue

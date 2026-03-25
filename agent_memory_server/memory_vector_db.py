@@ -477,13 +477,16 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         event_date = parse_timestamp(fields.get("event_date"))
         stale_after = parse_timestamp(fields.get("stale_after"))
 
-        # Provide defaults for required fields
+        # Provide defaults for required fields. Use epoch (not now()) so
+        # corrupt/missing timestamps are visibly stale and don't get boosted
+        # by recency scoring or survive compaction as "just created".
+        _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
         if not created_at:
-            created_at = datetime.now(UTC)
+            created_at = _EPOCH
         if not last_accessed:
-            last_accessed = datetime.now(UTC)
+            last_accessed = _EPOCH
         if not updated_at:
-            updated_at = datetime.now(UTC)
+            updated_at = _EPOCH
 
         # Normalize pinned/access_count from metadata
         pinned_meta = fields.get("pinned", 0)
