@@ -1187,6 +1187,62 @@ def _is_noise_content(text: str) -> bool:
     )
 
 
+# Source user normalization — maps slugified names back to full names.
+# The family registry at ~/.openclaw/family.json is the authoritative source.
+# Falls back to title-casing the slug if the registry isn't available.
+_FAMILY_NAME_MAP: dict[str, str] | None = None
+
+
+def _normalize_source_user(source_user: str) -> str:
+    """Normalize source_user from slug/short name to full name via family registry.
+
+    Handles all known input formats:
+      - Short key:    "chris"        → "Chris Baker"
+      - Snake slug:   "chris_baker"  → "Chris Baker"
+      - No-sep slug:  "chrisbaker"   → "Chris Baker"
+      - Display name: "Chris"        → "Chris Baker"
+      - Full name:    "Chris Baker"  → "Chris Baker" (passthrough)
+
+    Uses the same family.json structure and full-name construction as
+    extraction.py:_load_family_registry() — display_name + lastName (default "Baker").
+    """
+    global _FAMILY_NAME_MAP
+    if _FAMILY_NAME_MAP is None:
+        _FAMILY_NAME_MAP = {}
+        try:
+            import json
+            import os
+            family_path = os.path.expanduser("~/.openclaw/family.json")
+            with open(family_path) as f:
+                family = json.load(f)
+            # family.json: {"users": {"chris": {"displayName": "Chris", ...}, ...}}
+            users = family.get("users", {})
+            if isinstance(users, dict):
+                for key, user_obj in users.items():
+                    display = user_obj.get("displayName", key.title())
+                    last_name = user_obj.get("lastName", "Baker")
+                    full_name = f"{display} {last_name}"
+                    # Map every known variant to the canonical full name
+                    _FAMILY_NAME_MAP[key.lower()] = full_name                      # "chris"
+                    _FAMILY_NAME_MAP[display.lower()] = full_name                  # "chris"
+                    _FAMILY_NAME_MAP[full_name.lower()] = full_name                # "chris baker"
+                    _FAMILY_NAME_MAP[full_name.lower().replace(" ", "_")] = full_name  # "chris_baker"
+                    _FAMILY_NAME_MAP[full_name.lower().replace(" ", "")] = full_name   # "chrisbaker"
+        except Exception:
+            pass  # No family registry — fall back to title-case
+
+    # Exact match in map
+    lower = source_user.lower().strip()
+    if lower in _FAMILY_NAME_MAP:
+        return _FAMILY_NAME_MAP[lower]
+
+    # Slug pattern (underscores) → title case
+    if "_" in source_user and source_user == source_user.lower():
+        return source_user.replace("_", " ").title()
+
+    return source_user
+
+
 async def index_long_term_memories(
     memories: list[MemoryRecord | ExtractedMemoryRecord],
     redis_client: Redis | None = None,
@@ -1299,6 +1355,16 @@ async def index_long_term_memories(
                 f"id={memory.id}, text={memory.text[:80]}..."
             )
             continue
+
+        # Source user normalization: convert slugs (e.g., "chris_baker") to
+        # full names ("Chris Baker"). The session-memory-bridge and other callers
+        # sometimes pass slugified names. Normalize at ingestion so all stored
+        # records have consistent human-readable source_user values.
+        if hasattr(memory, 'source_user') and memory.source_user:
+            normalized = _normalize_source_user(memory.source_user)
+            if normalized != memory.source_user:
+                memory = memory.model_copy()
+                memory.source_user = normalized
 
         valid_memories.append(memory)
 
