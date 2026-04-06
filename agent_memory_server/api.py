@@ -667,11 +667,22 @@ async def create_long_term_memory(
         if not similar_memories_map:
             similar_memories_map = None
 
-    background_tasks.add_task(
-        long_term_memory.index_long_term_memories,
-        memories=payload.memories,
-        deduplicate=payload.deduplicate,
-    )
+    # Index synchronously to prevent memory loss when Ollama is down.
+    # Previously this was background (fire-and-forget), meaning the API returned
+    # 200 "ok" before embedding completed. If Ollama was unreachable, the memory
+    # was silently lost with no retry queue. Embedding takes <50ms locally, so
+    # the latency cost of synchronous indexing is negligible.
+    try:
+        await long_term_memory.index_long_term_memories(
+            memories=payload.memories,
+            deduplicate=payload.deduplicate,
+        )
+    except Exception as e:
+        logger.error(f"Failed to index memories: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail=f"Memory indexing failed (embedding service may be down): {e}",
+        )
     return StoreMemoryResponse(
         status="ok",
         similar_memories=similar_memories_map,
