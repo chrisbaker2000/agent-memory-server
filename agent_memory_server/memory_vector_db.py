@@ -1177,29 +1177,45 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
                 stale_after=stale_after,
             )
 
-            # Create FilterQuery for non-vector search
+            # Create FilterQuery for non-vector search and use Redis LIMIT
+            # paging rather than fetching (limit + offset) rows and slicing
+            # client-side. The previous implementation fetched `limit + offset`
+            # results on every call and discarded the first `offset` — quadratic
+            # memory in page count and, worse, broken past the RedisSearch
+            # MAXSEARCHRESULTS cap (the summary_views refresh paginates through
+            # every long-term memory and began erroring with
+            # "LIMIT exceeds maximum of 10000" once the index crossed 10k docs;
+            # see audit 2026-04-09 finding C1). With explicit paging the server
+            # is asked for exactly `limit` rows starting at `offset`.
             filter_query = FilterQuery(
                 filter_expression=redis_filter,
                 return_fields=self.RETURN_FIELDS,
-                num_results=limit + offset,
+                num_results=limit,
             )
+            filter_query.paging(offset, limit)
 
             # Execute query using index.query() which properly handles params
             results = await self._index.query(filter_query)
 
-            # Parse results (query() returns List[Dict[str, Any]])
+            # Parse results (query() returns List[Dict[str, Any]]).
+            # With explicit paging, `results` already starts at `offset`.
             memory_results: list[MemoryRecordResult] = []
-            for fields in results[offset:]:
+            for fields in results:
                 memory_result = self._data_to_memory_result(fields, score=0.0)
                 memory_results.append(memory_result)
 
                 if len(memory_results) >= limit:
                     break
 
-            next_offset = offset + limit if len(results) > offset + limit else None
+            # If we got a full page back, there MAY be more rows. Callers that
+            # need an authoritative total should pass text="" and accumulate.
+            next_offset = offset + limit if len(results) >= limit else None
 
             return MemoryRecordResults(
                 memories=memory_results[:limit],
+                # total is a page-local count (the previous implementation
+                # reported `len(results)` which was the fetched rows, not the
+                # true total). Preserve that semantic.
                 total=len(results),
                 next_offset=next_offset,
             )
