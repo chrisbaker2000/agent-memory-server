@@ -1346,7 +1346,14 @@ async def index_long_term_memories(
             r"mentioned|asked|enjoys|works|lives|loves|needs|feels|"
             r"believes|thinks|participates|uses|values|gave|ordered|"
             r"bought|tends|keeps|expressed|currently|also|recently|"
-            r"reported|said|told|requested|inquired|checked|noted)\b"
+            r"reported|said|told|requested|inquired|checked|noted|"
+            # Added 2026-04-14 after "User learned on April 5, 2026..."
+            # bypassed the earlier guard and reached production. Keep this
+            # list aligned with tests/memory/attribution.sh::check_no_user_prefix.
+            r"learned|started|stopped|stored|saved|added|removed|created|"
+            r"deleted|updated|visited|sent|received|replied|shared|"
+            r"confirmed|completed|finished|opened|closed|approved|rejected|"
+            r"wrote|read|bought|paid|owes|owns|plans|intends|knows)\b"
         )
         if re.search(_user_verb_pattern, _stripped):
             logger.warning(
