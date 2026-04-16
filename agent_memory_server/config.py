@@ -353,7 +353,13 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = None
     openai_api_base: str | None = None
     anthropic_api_base: str | None = None
-    generation_model: str = "gpt-5"
+    # Default to azure/-prefixed models so a missing env var can't accidentally
+    # route memory operations to paid OpenAI. Homelab deployment sets these via
+    # run-local.sh, but if the env vars fail to export (e.g., .env unreadable),
+    # the fallback must still be free Azure, not paid OpenAI.
+    # See DEEP-REVIEW-REPORT-2026-04-16 Phase 1 H2 for incident history (258
+    # RateLimit errors during the 2026-04-15 outage when env vars didn't load).
+    generation_model: str = "azure/gpt-5.4"
     embedding_model: str = "text-embedding-3-small"
 
     # Cloud
@@ -365,10 +371,11 @@ class Settings(BaseSettings):
     aws_secret_access_key: str | None = None
     aws_session_token: str | None = None
 
-    # Model selection for query optimization
-    slow_model: str = "gpt-5"  # Slower, more capable model for complex tasks
+    # Model selection for query optimization — azure/-prefixed for the same reason
+    # as generation_model above (free Azure instead of paid OpenAI fallback).
+    slow_model: str = "azure/gpt-5.4"  # Slower, more capable model for complex tasks
     fast_model: str = (
-        "gpt-5-mini"  # Faster, smaller model for quick tasks like query optimization
+        "azure/gpt-5-mini"  # Faster, smaller model for quick tasks like query optimization
     )
 
     # Model used for merging similar/duplicate memories during compaction.

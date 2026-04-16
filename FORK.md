@@ -37,7 +37,7 @@ A fork of [redis/agent-memory-server](https://github.com/redis/agent-memory-serv
 
 8. **Conflict detection** (`long_term_memory.py`, `api.py`) — `detect_similar_memories()` searches without merging. `POST /v1/long-term-memory/?detect_conflicts=true` returns similar memories for caller-driven dedup.
 
-9. **Safety defaults** (`config.py`) — Semantic dedup disabled (`semantic_dedup_enabled=False`, `deduplication_distance_threshold=0.0`). Automatic compaction disabled (`compaction_every_minutes=0`). Hash-based dedup remains active.
+9. **Safety defaults** (`config.py`) — Semantic dedup disabled (`semantic_dedup_enabled=False`, `deduplication_distance_threshold=0.0`). Automatic compaction disabled (`compaction_every_minutes=0`). Hash-based dedup remains active. `generation_model`, `slow_model`, and `fast_model` defaults changed from bare `"gpt-5"`/`"gpt-5-mini"` (which LiteLLM routes to paid OpenAI) to `"azure/gpt-5.4"`/`"azure/gpt-5-mini"` so the fallback stays on free Azure if env vars fail to export. Deep review 2026-04-16 H2.
 
 10. **Telemetry** (`telemetry.py`, `main.py`, `llm/embeddings.py`) — OTLP HTTP metrics to SigNoz (localhost:4318). Instruments embedding calls, search operations, memory store. 30s flush interval, non-blocking (HTTP happens outside the buffer lock). Uses `httpx` (declared dependency).
 

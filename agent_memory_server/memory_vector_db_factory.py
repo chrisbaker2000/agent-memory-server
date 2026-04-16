@@ -145,12 +145,18 @@ def _build_redis_schema() -> dict:
             {"name": "user_id", "type": "tag"},
             {"name": "namespace", "type": "tag"},
             {"name": "memory_type", "type": "tag"},
-            {"name": "topics", "type": "tag"},
-            {"name": "entities", "type": "tag"},
+            # topics/entities/extracted_from are written with "|" as the
+            # separator in _memory_to_data() (memory_vector_db.py:394-398).
+            # Without attrs.separator="|", the TAG field defaulted to "," and
+            # stored each compound value as a single tag — so FT.SEARCH queries
+            # like @topics:{family} failed to match records with
+            # topics="family|heritage". Fixed 2026-04-16 after deep review.
+            {"name": "topics", "type": "tag", "attrs": {"separator": "|"}},
+            {"name": "entities", "type": "tag", "attrs": {"separator": "|"}},
             {"name": "memory_hash", "type": "tag"},
             {"name": "discrete_memory_extracted", "type": "tag"},
             {"name": "pinned", "type": "tag"},
-            {"name": "extracted_from", "type": "tag"},
+            {"name": "extracted_from", "type": "tag", "attrs": {"separator": "|"}},
             {"name": "id_", "type": "tag"},
             {"name": "source_user", "type": "tag"},
             {"name": "source_channel", "type": "tag"},
