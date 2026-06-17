@@ -544,6 +544,25 @@ Optimized query:"""
     hybrid_search_rrf_k: int = 60  # Standard RRF constant; higher = more weight to top ranks
     hybrid_search_text_results_multiplier: int = 3  # Fetch N * limit results from each source
 
+    # Search-query length clamp. A pathologically long recall query (e.g. a
+    # whole pasted document) is clamped to this many characters at the search
+    # entry point before embedding, so it degrades to a partial semantic search
+    # instead of erroring. Adapted from wfr-finley's clampSearchText
+    # (MEMORY_SEARCH_TEXT_CAP). Always on.
+    max_search_query_chars: int = 2000
+
+    # Recall relevance gate (deterministic, LLM-free precision filter on the
+    # weak-distance tail; see utils/relevance.py). Ships DEFAULT-OFF to protect
+    # the conceptual recall this deployment values. Enable deliberately after a
+    # shadow-mode evaluation.
+    #   _enabled: actually drop the no-anchor weak tail.
+    #   _shadow:  log/measure what WOULD drop without dropping (eval mode).
+    #   _distance_floor: results at or below this vector distance are ALWAYS
+    #       kept (strong semantic matches), regardless of term overlap.
+    recall_relevance_gate_enabled: bool = False
+    recall_relevance_gate_shadow: bool = False
+    recall_relevance_gate_distance_floor: float = 0.25
+
     # Compaction settings
     # Set to 0 to disable automatic compaction entirely.
     # Previously 10 (every 10 min). Disabled 2026-03-10 because the semantic

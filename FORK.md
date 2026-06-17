@@ -47,6 +47,8 @@ A fork of [redis/agent-memory-server](https://github.com/redis/agent-memory-serv
 
 13. **Dedup fix** (`long_term_memory.py`) — Fixed variable shadowing bug in `deduplicate_by_semantic_search`.
 
+14. **Search-query clamp + recall relevance gate** (`long_term_memory.py`, `config.py`, `utils/relevance.py`) — Ported from wfr-finley (SOC2 OpenClaw). `search_long_term_memories` clamps the query to `max_search_query_chars` (2000, always on) before embedding so an oversized recall degrades gracefully. A deterministic, LLM-free relevance gate (`utils/relevance.py`) trims the weak-distance tail of results that share no salient whole-word term with the query — but ships **DEFAULT-OFF** (`recall_relevance_gate_enabled=False`) with a shadow mode (`recall_relevance_gate_shadow`) to protect this deployment's conceptual recall; strong semantic matches (`dist <= recall_relevance_gate_distance_floor`, 0.25) are always kept. Term matching is by tokenization, never substring (no "ben"↔"Bennett" leak). Tests: `tests/test_relevance_gate.py` (21), `tests/test_search_query_clamp.py` (3).
+
 ### Test Coverage
 
 - `tests/test_attribution.py` — 29 tests: merge propagation, extraction inheritance, persistence round-trips, search filtering, API endpoints, MCP tools.

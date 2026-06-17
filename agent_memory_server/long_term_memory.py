@@ -54,6 +54,7 @@ from agent_memory_server.utils.recency import (
     rerank_with_recency,
     update_memory_hash_if_text_changed,
 )
+from agent_memory_server.utils.relevance import apply_relevance_gate
 from agent_memory_server.utils.redis import get_redis_conn
 
 
@@ -1551,6 +1552,19 @@ async def search_long_term_memories(
             offset=offset,
         )
 
+    # Search-query length clamp. A pathologically long recall query (a whole
+    # pasted document, an over-stuffed conversation window) is clamped before
+    # embedding so it degrades to a partial semantic search rather than erroring
+    # or wasting an oversized embedding call. Adapted from wfr-finley
+    # clampSearchText. Applied to the ORIGINAL text so both the optimized and
+    # fallback paths below operate on the bounded query.
+    _query_cap = settings.max_search_query_chars
+    if _query_cap and len(text) > _query_cap:
+        logger.info(
+            f"[search_long_term_memories] clamping query from {len(text)} to {_query_cap} chars"
+        )
+        text = text[:_query_cap]
+
     # Optimize query for vector search if requested.
     search_query = text
     optimized_applied = False
@@ -1627,6 +1641,32 @@ async def search_long_term_memories(
             )
     except Exception as e:
         logger.warning("Optimized-query fallback search failed: %s", e)
+
+    # Recall relevance gate (deterministic; see utils/relevance.py). Trims the
+    # weak-distance tail that shares no salient term with the query. Default-OFF;
+    # shadow mode logs what would drop without dropping. Applied against the
+    # ORIGINAL query text (`text`) — the user's words, not the LLM-optimized
+    # rewrite — since the gate measures lexical anchoring to what was asked.
+    if settings.recall_relevance_gate_enabled and results.memories:
+        outcome = apply_relevance_gate(
+            [(m.text, m.dist) for m in results.memories],
+            text,
+            enabled=settings.recall_relevance_gate_enabled,
+            shadow=settings.recall_relevance_gate_shadow,
+            distance_floor=settings.recall_relevance_gate_distance_floor,
+        )
+        if outcome.dropped_count:
+            _verb = "would drop (shadow)" if outcome.shadow else "dropped"
+            _floor = settings.recall_relevance_gate_distance_floor
+            logger.info(
+                f"[search_long_term_memories] relevance gate {_verb} "
+                f"{outcome.dropped_count}/{len(results.memories)} weak-tail results "
+                f"(floor={_floor:.3f}, query={text[:80]!r})"
+            )
+        if not outcome.shadow and outcome.dropped_count:
+            kept = set(outcome.kept_indices)
+            results.memories = [m for i, m in enumerate(results.memories) if i in kept]
+            results.total = len(results.memories)
 
     # Debug: Log search output
     memory_previews = [
