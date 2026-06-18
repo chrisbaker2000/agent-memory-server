@@ -16,8 +16,6 @@ from agent_memory_server.logging import get_logger
 from agent_memory_server.models import (
     AckResponse,
     CreateMemoryRecordRequest,
-    SimilarMemoryInfo,
-    StoreMemoryResponse,
     CreateSummaryViewRequest,
     EditMemoryRecordRequest,
     GetSessionsQuery,
@@ -31,8 +29,12 @@ from agent_memory_server.models import (
     RunSummaryViewRequest,
     SearchRequest,
     SessionListResponse,
+    SimilarMemoryInfo,
+    StoreMemoryResponse,
     SummaryView,
     SummaryViewPartitionResult,
+    SupersedeMemoryRequest,
+    SupersedeMemoryResponse,
     SystemMessage,
     Task,
     TaskStatusEnum,
@@ -719,6 +721,7 @@ async def search_long_term_memory(
         "limit": payload.limit,
         "offset": payload.offset,
         "optimize_query": optimize_query,
+        "include_superseded": payload.include_superseded,
         **filters,
     }
 
@@ -938,6 +941,60 @@ async def update_long_term_memory(
         return updated_memory
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post(
+    "/v1/long-term-memory/{memory_id}/supersede",
+    response_model=SupersedeMemoryResponse,
+)
+async def supersede_long_term_memory(
+    memory_id: str,
+    payload: SupersedeMemoryRequest,
+    current_user: UserInfo = Depends(get_current_user),
+):
+    """Supersede a memory with a newer version (non-destructive versioning).
+
+    The target record is retained, stamped with ``superseded_by`` + ``valid_to``,
+    and hidden from default recall. Ported from wfr-memory-commons. This is the
+    "link, don't merge" alternative to destructive LLM merge.
+
+    Returns 404 if the target (or, by default, the replacement) is missing,
+    409 on a conflicting existing supersede link, 400 on a self-supersede.
+    """
+    if not settings.long_term_memory:
+        raise HTTPException(status_code=400, detail="Long-term memory is disabled")
+
+    status, record = await long_term_memory.supersede_memory(
+        memory_id,
+        payload.replacement_id,
+        require_replacement_exists=payload.require_replacement_exists,
+        force=payload.force,
+    )
+
+    if status == long_term_memory.SUPERSEDE_SELF:
+        raise HTTPException(
+            status_code=400, detail="A memory cannot supersede itself"
+        )
+    if status == long_term_memory.SUPERSEDE_TARGET_MISSING:
+        raise HTTPException(
+            status_code=404, detail=f"Memory with ID {memory_id} not found"
+        )
+    if status == long_term_memory.SUPERSEDE_REPLACEMENT_MISSING:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Replacement memory {payload.replacement_id} not found",
+        )
+    if status == long_term_memory.SUPERSEDE_CONFLICT:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Memory {memory_id} is already superseded by "
+                f"{record.superseded_by if record else 'another record'}; "
+                "pass force=true to override"
+            ),
+        )
+
+    return SupersedeMemoryResponse(status=status, memory=record)
 
 
 @router.post("/v1/memory/prompt", response_model=MemoryPromptResponse)

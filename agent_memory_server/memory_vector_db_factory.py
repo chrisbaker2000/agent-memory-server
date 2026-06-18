@@ -161,6 +161,18 @@ def _build_redis_schema() -> dict:
             {"name": "source_user", "type": "tag"},
             {"name": "source_channel", "type": "tag"},
             {"name": "visibility", "type": "tag"},
+            # Provenance & versioning (ported from wfr-memory-commons). kind +
+            # confidence_idx are OPT-IN recall filters; superseded_by powers the
+            # default-recall hiding of versioned records. These are returned via
+            # RETURN_FIELDS regardless of indexing (FT.SEARCH reads hash fields),
+            # so storage + supersede-hiding work immediately on upgrade; the kind/
+            # min_confidence *query filters* only function after a rebuild-index
+            # adds these to the live index. derived_from/observed_at/valid_from
+            # are store-and-return only (NOT indexed).
+            {"name": "kind", "type": "tag"},
+            {"name": "superseded_by", "type": "tag"},
+            {"name": "confidence_idx", "type": "numeric"},
+            {"name": "valid_to_ts", "type": "numeric"},
             {"name": "access_count", "type": "numeric"},
             {"name": "stale_after", "type": "numeric"},
             {"name": "created_at", "type": "numeric"},

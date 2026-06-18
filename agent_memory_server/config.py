@@ -353,13 +353,11 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = None
     openai_api_base: str | None = None
     anthropic_api_base: str | None = None
-    # Default to azure/-prefixed models so a missing env var can't accidentally
-    # route memory operations to paid OpenAI. Homelab deployment sets these via
-    # run-local.sh, but if the env vars fail to export (e.g., .env unreadable),
-    # the fallback must still be free Azure, not paid OpenAI.
-    # See DEEP-REVIEW-REPORT-2026-04-16 Phase 1 H2 for incident history (258
-    # RateLimit errors during the 2026-04-15 outage when env vars didn't load).
-    generation_model: str = "azure/gpt-5.4"
+    # Migrated from Azure to direct Anthropic on 2026-04-20. Homelab deployment
+    # sets these via run-local.sh; the fallback here is Claude Haiku 4.5 (cheap,
+    # fast) via direct Anthropic API so memory operations still work if env vars
+    # fail to export.
+    generation_model: str = "anthropic/claude-haiku-4-5-20251001"
     embedding_model: str = "text-embedding-3-small"
 
     # Cloud
@@ -371,12 +369,10 @@ class Settings(BaseSettings):
     aws_secret_access_key: str | None = None
     aws_session_token: str | None = None
 
-    # Model selection for query optimization — azure/-prefixed for the same reason
-    # as generation_model above (free Azure instead of paid OpenAI fallback).
-    slow_model: str = "azure/gpt-5.4"  # Slower, more capable model for complex tasks
-    fast_model: str = (
-        "azure/gpt-5-mini"  # Faster, smaller model for quick tasks like query optimization
-    )
+    # Model selection for query optimization — direct Anthropic (migrated from
+    # Azure 2026-04-20). Sonnet for slow/complex, Haiku for fast/simple.
+    slow_model: str = "anthropic/claude-sonnet-4-6"
+    fast_model: str = "anthropic/claude-haiku-4-5-20251001"
 
     # Model used for merging similar/duplicate memories during compaction.
     # Defaults to None, which resolves to generation_model at runtime.
@@ -562,6 +558,22 @@ Optimized query:"""
     recall_relevance_gate_enabled: bool = False
     recall_relevance_gate_shadow: bool = False
     recall_relevance_gate_distance_floor: float = 0.25
+
+    # Write-time content security (see utils/content_security.py). Ported from
+    # wfr-memory-commons (further-memory) dlp.py + content_trust.py — the
+    # pure-Python halves only. Applied in the universal write funnel
+    # index_long_term_memories(), so every write path is covered.
+    #   _sanitization: NFC-normalize + strip control/zero-width/bidi chars
+    #       (removal-only, cheap, defends against obfuscated-injection storage).
+    #   _secret_redaction: scrub API keys / private-key blocks / tokens to
+    #       [REDACTED:<label>] before embed/store (a stored secret is a RAG
+    #       re-injection/exfil target). Redact-not-reject.
+    #   _injection_scan: flag (log + telemetry) instruction-shaped text; never
+    #       rejects or mutates the record (flag-and-keep heuristic).
+    # All default ON; sanitization + redaction are removal-only and safe.
+    memory_text_sanitization_enabled: bool = True
+    memory_secret_redaction_enabled: bool = True
+    memory_injection_scan_enabled: bool = True
 
     # Compaction settings
     # Set to 0 to disable automatic compaction entirely.

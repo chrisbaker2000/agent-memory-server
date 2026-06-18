@@ -297,3 +297,31 @@ class VisibilityFilter(TagFilter):
 
 class StaleAfter(DateTimeFilter):
     field: str = "stale_after"
+
+
+# --- Provenance & versioning filters (ported from wfr-memory-commons) ---
+
+
+class Kind(TagFilter):
+    """Opt-in recall filter on the memory `kind` TAG (fact/event/preference/
+    summary). Requires the index to carry the `kind` field — run rebuild-index
+    after upgrade to activate."""
+
+    field: str = "kind"
+
+
+class MinConfidence(BaseModel):
+    """Inclusive floor on `confidence_idx` (an opt-in recall filter).
+
+    Records carry a companion NUMERIC `confidence_idx`: the real score when
+    scored, else an above-range sentinel (CONFIDENCE_UNSCORED_SENTINEL = 2.0)
+    so UNSCORED records always pass any floor. A dedicated filter (not NumFilter)
+    because confidence is a float in [0, 1] and NumFilter coerces to int.
+    Ported from further-memory's min_confidence floor.
+    """
+
+    field: str = "confidence_idx"
+    gte: float
+
+    def to_filter(self) -> FilterExpression:
+        return Num(self.field) >= self.gte

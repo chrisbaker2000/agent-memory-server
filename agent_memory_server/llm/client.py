@@ -285,7 +285,7 @@ class LLMClient:
         Resolution order:
         1. MODEL_CONFIGS (custom overrides)
         2. LLMClient's internal model database
-        3. Fallback to gpt-5-mini defaults with warning
+        3. Fallback to claude-haiku-4-5 defaults with warning (post-Azure 2026-04-20)
 
         Args:
             model_name: Name of the model (e.g., "gpt-5", "claude-3-sonnet-20240229")
@@ -319,17 +319,17 @@ class LLMClient:
         except Exception as e:
             logger.debug(f"Failed to resolve model configuration for {model_name}: {e}")
 
-        # Final fallback to gpt-5-mini defaults
+        # Final fallback to claude-haiku-4-5 defaults (post-Azure 2026-04-20)
         logger.warning(
             f"Model {model_name!r} not found in LLMClient model database or MODEL_CONFIGS. "
-            "Using gpt-5-mini defaults."
+            "Using claude-haiku-4-5 defaults."
         )
         return MODEL_CONFIGS.get(
-            "gpt-5-mini",
+            "claude-haiku-4-5-20251001",
             ModelConfig(
-                provider=cls._map_provider("openai"),
+                provider=cls._map_provider("anthropic"),
                 name=model_name,
-                max_tokens=128000,
+                max_tokens=200000,
                 embedding_dimensions=1536,
             ),
         )

@@ -25,9 +25,11 @@ from agent_memory_server.filters import (
     CreatedAt,
     Entities,
     EventDate,
+    Kind,
     LastAccessed,
     MemoryHash,
     MemoryType,
+    MinConfidence,
     Namespace,
     SessionId,
     SourceChannel,
@@ -47,6 +49,8 @@ from agent_memory_server.models import (
     MemoryRecordResults,
     MemoryTypeEnum,
 )
+from agent_memory_server.telemetry import record_counter
+from agent_memory_server.utils.content_security import apply_content_security
 from agent_memory_server.utils.keys import Keys
 from agent_memory_server.utils.recency import (
     _days_between,
@@ -54,8 +58,8 @@ from agent_memory_server.utils.recency import (
     rerank_with_recency,
     update_memory_hash_if_text_changed,
 )
-from agent_memory_server.utils.relevance import apply_relevance_gate
 from agent_memory_server.utils.redis import get_redis_conn
+from agent_memory_server.utils.relevance import apply_relevance_gate
 
 
 # Track pending extraction tasks to prevent garbage collection
@@ -1283,6 +1287,48 @@ async def index_long_term_memories(
             )
             continue
 
+        # Content security pass (ported from wfr-memory-commons dlp.py +
+        # content_trust.py): NFC-normalize + strip control/zero-width chars,
+        # redact secret shapes (API keys, private-key blocks, tokens) before the
+        # text is embedded or stored, and flag (log + telemetry) injection-shaped
+        # text. Runs FIRST so downstream guards (noise, size, "User") operate on
+        # the cleaned + redacted text. Removal-only for sanitize/redact, so this
+        # can only shorten text — never bypasses the size guard below. Each step
+        # is independently gated in config; redact/sanitize default ON.
+        sec = apply_content_security(
+            memory.text,
+            sanitize=settings.memory_text_sanitization_enabled,
+            redact=settings.memory_secret_redaction_enabled,
+            scan=settings.memory_injection_scan_enabled,
+        )
+        if sec.secrets_redacted:
+            # Log the labels (the secret TYPE), never the secret itself.
+            logger.warning(
+                f"Redacted secret(s) from memory before storage: "
+                f"labels={list(sec.secret_labels)}, id={memory.id}"
+            )
+            record_counter(
+                "memory_server.content_security.secrets_redacted",
+                value=float(len(sec.secret_labels)),
+                attributes={"labels": ",".join(sec.secret_labels)},
+            )
+        if sec.injection_signals:
+            # Flag-and-keep: surface for review, but store the record. The
+            # load-bearing injection defense is the gateway's read-time handling.
+            logger.warning(
+                f"Memory text matched injection signal(s) (flagged, not rejected): "
+                f"signals={list(sec.injection_signals)}, id={memory.id}, "
+                f"text={memory.text[:80]}..."
+            )
+            record_counter(
+                "memory_server.content_security.injection_flagged",
+                value=1.0,
+                attributes={"signals": ",".join(sec.injection_signals)},
+            )
+        if sec.changed:
+            memory = memory.model_copy()
+            memory.text = sec.text
+
         # Content noise guard: reject memories that are operational noise,
         # not genuine user knowledge. This catches all write paths (API,
         # manager, extraction, promotion, plugin).
@@ -1373,6 +1419,18 @@ async def index_long_term_memories(
             if normalized != memory.source_user:
                 memory = memory.model_copy()
                 memory.source_user = normalized
+
+        # Provenance temporal stamping (ported from wfr-memory-commons): when the
+        # writer doesn't supply observed_at / valid_from, default both to
+        # created_at so every record has a populated validity window + last-
+        # observed timestamp. valid_to stays None ("still valid"); superseded_by
+        # stays None — both are server-managed by the supersede endpoint.
+        if memory.observed_at is None or memory.valid_from is None:
+            memory = memory.model_copy()
+            if memory.observed_at is None:
+                memory.observed_at = memory.created_at
+            if memory.valid_from is None:
+                memory.valid_from = memory.created_at
 
         valid_memories.append(memory)
 
@@ -1496,6 +1554,9 @@ async def search_long_term_memories(
     source_channel: SourceChannel | None = None,
     visibility: VisibilityFilter | None = None,
     stale_after: StaleAfter | None = None,
+    kind: Kind | None = None,
+    min_confidence: MinConfidence | None = None,
+    include_superseded: bool = False,
     server_side_recency: bool | None = None,
     recency_params: dict | None = None,
     limit: int = 10,
@@ -1601,6 +1662,8 @@ async def search_long_term_memories(
         source_channel=source_channel,
         visibility=visibility,
         stale_after=stale_after,
+        kind=kind,
+        min_confidence=min_confidence,
         distance_threshold=distance_threshold,
         server_side_recency=server_side_recency,
         recency_params=recency_params,
@@ -1633,6 +1696,8 @@ async def search_long_term_memories(
                 source_channel=source_channel,
                 visibility=visibility,
                 stale_after=stale_after,
+                kind=kind,
+                min_confidence=min_confidence,
                 distance_threshold=distance_threshold,
                 server_side_recency=server_side_recency,
                 recency_params=recency_params,
@@ -1667,6 +1732,22 @@ async def search_long_term_memories(
             kept = set(outcome.kept_indices)
             results.memories = [m for i, m in enumerate(results.memories) if i in kept]
             results.total = len(results.memories)
+
+    # Supersede-hiding (versioning; ported from wfr-memory-commons). By default,
+    # records that have been replaced by a newer version (superseded_by set) are
+    # hidden from recall. Done as a post-filter — NOT a Redis query predicate —
+    # so records written before this field existed (no superseded_by on the hash)
+    # are correctly treated as "not superseded" and always kept. include_superseded
+    # surfaces them (e.g. for history/audit views).
+    if not include_superseded and results.memories:
+        before = len(results.memories)
+        results.memories = [m for m in results.memories if not m.superseded_by]
+        hidden = before - len(results.memories)
+        if hidden:
+            results.total = len(results.memories)
+            logger.debug(
+                f"[search_long_term_memories] hid {hidden} superseded record(s)"
+            )
 
     # Debug: Log search output
     memory_previews = [
@@ -2492,6 +2573,13 @@ async def update_long_term_memory(
         "source_channel",
         "visibility",
         "stale_after",
+        # Client-settable provenance (valid_to / superseded_by are server-managed
+        # via supersede_memory, deliberately excluded here).
+        "kind",
+        "confidence",
+        "derived_from",
+        "observed_at",
+        "valid_from",
     }
 
     # Validate update fields
@@ -2511,6 +2599,79 @@ async def update_long_term_memory(
     await db.update_memories([updated_memory])
 
     return updated_memory
+
+
+# Outcome statuses for supersede_memory (mirrors further-memory's contract).
+SUPERSEDE_OK = "superseded"
+SUPERSEDE_IDEMPOTENT = "idempotent"
+SUPERSEDE_TARGET_MISSING = "target_missing"
+SUPERSEDE_REPLACEMENT_MISSING = "replacement_missing"
+SUPERSEDE_SELF = "self_supersede"
+SUPERSEDE_CONFLICT = "conflict"
+
+
+async def supersede_memory(
+    target_id: str,
+    replacement_id: str,
+    *,
+    require_replacement_exists: bool = True,
+    force: bool = False,
+) -> tuple[str, MemoryRecord | None]:
+    """Mark a memory as superseded by a newer version (non-destructive versioning).
+
+    Ported from wfr-memory-commons' ``POST /v1/memories/{id}/supersede``. This is
+    the "link, don't merge" alternative to LLM merge that the fork's design
+    forbids: the old record is RETAINED in Redis, stamped with
+    ``superseded_by = replacement_id`` and ``valid_to = now``, and hidden from
+    default recall (``include_superseded=True`` surfaces it). The replacement is
+    a separate, already-stored record.
+
+    Args:
+        target_id: ID of the record being superseded (the old version).
+        replacement_id: ID of the newer record that replaces it.
+        require_replacement_exists: When True (default), 404 if the replacement
+            is not present. Set False to allow forward-references.
+        force: When True, overwrite an existing supersede link (the default
+            refuses, returning ``conflict``, to keep versioning monotonic).
+
+    Returns:
+        ``(status, updated_record_or_None)`` where status is one of the
+        ``SUPERSEDE_*`` constants.
+    """
+    if target_id == replacement_id:
+        return SUPERSEDE_SELF, None
+
+    target = await get_long_term_memory_by_id(target_id)
+    if not target:
+        return SUPERSEDE_TARGET_MISSING, None
+
+    if require_replacement_exists:
+        replacement = await get_long_term_memory_by_id(replacement_id)
+        if not replacement:
+            return SUPERSEDE_REPLACEMENT_MISSING, None
+
+    # Already superseded? Idempotent if pointing at the same replacement;
+    # conflict otherwise (unless force overrides).
+    if target.superseded_by:
+        if target.superseded_by == replacement_id:
+            return SUPERSEDE_IDEMPOTENT, target
+        if not force:
+            return SUPERSEDE_CONFLICT, target
+
+    now = datetime.now(UTC)
+    updated = target.model_copy(
+        update={
+            "superseded_by": replacement_id,
+            "valid_to": now,
+            "updated_at": now,
+        }
+    )
+    db = await get_memory_vector_db()
+    await db.update_memories([updated])
+    logger.info(
+        f"Superseded memory {target_id} -> {replacement_id} (valid_to={now.isoformat()})"
+    )
+    return SUPERSEDE_OK, updated
 
 
 def _is_numeric(value: Any) -> bool:

@@ -16,8 +16,10 @@ from agent_memory_server.filters import (
     CreatedAt,
     Entities,
     EventDate,
+    Kind,
     LastAccessed,
     MemoryType,
+    MinConfidence,
     Namespace,
     SessionId,
     SourceChannel,
@@ -346,6 +348,64 @@ class MemoryRecord(BaseModel):
     stale_after: datetime | None = Field(
         default=None,
         description="Datetime after which this memory should be considered stale",
+    )
+    # --- Provenance & versioning (ported from wfr-memory-commons / further-memory) ---
+    kind: Literal["fact", "event", "preference", "summary"] | None = Field(
+        default=None,
+        description=(
+            "Memory kind. Recall FILTER only — does not affect dedup or ranking. "
+            "Indexed as a TAG; filtering requires the index to carry the field "
+            "(rebuild-index after upgrade). None = unspecified (treated as 'fact')."
+        ),
+    )
+    confidence: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Optional confidence score in [0, 1]. None = UNSCORED (a first-hand "
+            "capture), deliberately distinct from a low score. Used only as an "
+            "opt-in recall floor (min_confidence); unscored records always pass "
+            "the floor via an above-range sentinel in confidence_idx."
+        ),
+    )
+    derived_from: list[str] | None = Field(
+        default=None,
+        description=(
+            "Provenance: the memory IDs this record was synthesized from. "
+            "Client-supplied, store-and-return only (NOT indexed). None (never "
+            "[]) means 'no provenance'. Complements the fork's no-LLM-merge "
+            "principle: link lineage instead of destructively merging."
+        ),
+    )
+    observed_at: datetime | None = Field(
+        default=None,
+        description=(
+            "When the fact was last observed true (distinct from created_at). "
+            "Server stamps = created_at when omitted. Store-and-return only."
+        ),
+    )
+    valid_from: datetime | None = Field(
+        default=None,
+        description=(
+            "Start of this record's validity window. Server stamps = created_at "
+            "when omitted. Store-and-return only."
+        ),
+    )
+    valid_to: datetime | None = Field(
+        default=None,
+        description=(
+            "End of validity window. None = still valid. Server-managed — set by "
+            "the supersede endpoint, not by clients on write."
+        ),
+    )
+    superseded_by: str | None = Field(
+        default=None,
+        description=(
+            "ID of the replacement record, if any. Set only by the supersede "
+            "endpoint. Superseded records are hidden from default recall "
+            "(include_superseded=True surfaces them)."
+        ),
     )
 
 
@@ -796,6 +856,24 @@ class SearchRequest(BaseModel):
         default=None,
         description="Optional visibility scope to filter by",
     )
+    kind: Kind | None = Field(
+        default=None,
+        description="Optional memory kind to filter by (requires rebuilt index)",
+    )
+    min_confidence: MinConfidence | None = Field(
+        default=None,
+        description=(
+            "Optional inclusive confidence floor (requires rebuilt index). "
+            "Unscored records always pass via the above-range sentinel."
+        ),
+    )
+    include_superseded: bool = Field(
+        default=False,
+        description=(
+            "If True, include records that have been superseded by a newer "
+            "version. Default False hides them from recall."
+        ),
+    )
     limit: int = Field(
         default=10,
         ge=1,
@@ -881,6 +959,12 @@ class SearchRequest(BaseModel):
 
         if self.visibility is not None:
             filters["visibility"] = self.visibility
+
+        if self.kind is not None:
+            filters["kind"] = self.kind
+
+        if self.min_confidence is not None:
+            filters["min_confidence"] = self.min_confidence
 
         return filters
 
@@ -971,6 +1055,46 @@ class EditMemoryRecordRequest(BaseModel):
     )
     stale_after: datetime | None = Field(
         default=None, description="Updated stale-after datetime for the memory"
+    )
+    kind: Literal["fact", "event", "preference", "summary"] | None = Field(
+        default=None, description="Updated memory kind"
+    )
+    confidence: float | None = Field(
+        default=None, ge=0.0, le=1.0, description="Updated confidence score [0, 1]"
+    )
+    derived_from: list[str] | None = Field(
+        default=None, description="Updated provenance (memory IDs synthesized from)"
+    )
+    observed_at: datetime | None = Field(
+        default=None, description="Updated last-observed-true datetime"
+    )
+    valid_from: datetime | None = Field(
+        default=None, description="Updated start of validity window"
+    )
+
+
+class SupersedeMemoryRequest(BaseModel):
+    """Payload for superseding a memory with a newer version."""
+
+    replacement_id: str = Field(
+        description="ID of the newer record that replaces the target",
+    )
+    require_replacement_exists: bool = Field(
+        default=True,
+        description="If True (default), 404 when the replacement record is absent",
+    )
+    force: bool = Field(
+        default=False,
+        description="If True, overwrite an existing supersede link (default refuses)",
+    )
+
+
+class SupersedeMemoryResponse(BaseModel):
+    """Result of a supersede operation."""
+
+    status: str = Field(description="Outcome: superseded | idempotent | etc.")
+    memory: MemoryRecord | None = Field(
+        default=None, description="The updated (superseded) record, when applicable"
     )
 
 

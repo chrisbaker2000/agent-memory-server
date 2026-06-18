@@ -21,9 +21,11 @@ from agent_memory_server.filters import (
     Entities,
     EventDate,
     Id,
+    Kind,
     LastAccessed,
     MemoryHash,
     MemoryType,
+    MinConfidence,
     Namespace,
     SessionId,
     SourceChannel,
@@ -43,6 +45,15 @@ from agent_memory_server.utils.redis_query import RecencyAggregationQuery
 
 
 logger = logging.getLogger(__name__)
+
+# --- Provenance & versioning sentinels (ported from wfr-memory-commons) ---
+# An UNSCORED memory (confidence is None) is stored with an above-range
+# confidence_idx so it always passes any inclusive min_confidence floor (a
+# min_confidence query should never silently drop first-hand captures).
+CONFIDENCE_UNSCORED_SENTINEL = 2.0
+# An open-ended validity window (valid_to is None → "still valid") is stored
+# with a far-future valid_to_ts so a single range query covers the null case.
+VALID_TO_SENTINEL = 9_999_999_999.0
 
 
 class MemoryVectorDatabase(ABC):
@@ -84,6 +95,8 @@ class MemoryVectorDatabase(ABC):
         source_channel: SourceChannel | None = None,
         visibility: VisibilityFilter | None = None,
         stale_after: StaleAfter | None = None,
+        kind: Kind | None = None,
+        min_confidence: MinConfidence | None = None,
         distance_threshold: float | None = None,
         server_side_recency: bool | None = None,
         recency_params: dict | None = None,
@@ -337,6 +350,16 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         "source_channel",
         "visibility",
         "stale_after",
+        # Provenance & versioning. Returned even when not indexed in the live
+        # index (FT.SEARCH RETURN reads hash fields directly), so storage +
+        # supersede-hiding work before a rebuild-index.
+        "kind",
+        "confidence_idx",
+        "derived_from",
+        "observed_at",
+        "valid_from",
+        "valid_to",
+        "superseded_by",
     ]
 
     def __init__(self, index: AsyncSearchIndex, embeddings: Any):
@@ -387,6 +410,14 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         stale_after_val = (
             memory.stale_after.timestamp() if memory.stale_after else None
         )
+        # Provenance & versioning temporal companions.
+        observed_at_val = (
+            memory.observed_at.timestamp() if memory.observed_at else None
+        )
+        valid_from_val = (
+            memory.valid_from.timestamp() if memory.valid_from else None
+        )
+        valid_to_val = memory.valid_to.timestamp() if memory.valid_to else None
 
         pinned_int = 1 if getattr(memory, "pinned", False) else 0
         access_count_int = int(getattr(memory, "access_count", 0) or 0)
@@ -396,6 +427,9 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         entities_str = "|".join(memory.entities) if memory.entities else ""
         extracted_from_str = (
             "|".join(memory.extracted_from) if memory.extracted_from else ""
+        )
+        derived_from_str = (
+            "|".join(memory.derived_from) if memory.derived_from else ""
         )
 
         memory_type_val = (
@@ -421,6 +455,23 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
             "source_user": memory.source_user or "",
             "source_channel": memory.source_channel or "",
             "visibility": memory.visibility or "everyone",
+            # Provenance & versioning. Empty string = "unset" for TAG fields
+            # (Redis treats empty tags as absent, so they don't match queries).
+            "kind": memory.kind or "",
+            "superseded_by": memory.superseded_by or "",
+            "derived_from": derived_from_str,
+            # confidence_idx is ALWAYS written: the real score when scored, else
+            # the above-range sentinel so unscored records pass any min floor.
+            "confidence_idx": (
+                memory.confidence
+                if memory.confidence is not None
+                else CONFIDENCE_UNSCORED_SENTINEL
+            ),
+            # valid_to_ts is ALWAYS written: the real ts when bounded, else the
+            # far-future sentinel ("still valid") so a range query covers null.
+            "valid_to_ts": (
+                valid_to_val if valid_to_val is not None else VALID_TO_SENTINEL
+            ),
         }
 
         # Add numeric datetime fields (only if not None, to keep data clean)
@@ -436,6 +487,16 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
             data["event_date"] = event_date_val
         if stale_after_val is not None:
             data["stale_after"] = stale_after_val
+        # Store-and-return temporal companions (not indexed). The wire-side
+        # datetime is reconstructed from these on read.
+        if observed_at_val is not None:
+            data["observed_at"] = observed_at_val
+        if valid_from_val is not None:
+            data["valid_from"] = valid_from_val
+        # valid_to is stored as the ISO companion only when actually bounded;
+        # the indexed valid_to_ts (with sentinel) is the query-side field.
+        if valid_to_val is not None:
+            data["valid_to"] = valid_to_val
 
         return data
 
@@ -476,6 +537,9 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         persisted_at = parse_timestamp(fields.get("persisted_at"))
         event_date = parse_timestamp(fields.get("event_date"))
         stale_after = parse_timestamp(fields.get("stale_after"))
+        observed_at = parse_timestamp(fields.get("observed_at"))
+        valid_from = parse_timestamp(fields.get("valid_from"))
+        valid_to = parse_timestamp(fields.get("valid_to"))
 
         # Provide defaults for required fields. Use epoch (not now()) so
         # corrupt/missing timestamps are visibly stale and don't get boosted
@@ -509,6 +573,22 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         source_channel = fields.get("source_channel") or None
         visibility = fields.get("visibility") or "everyone"
 
+        # Provenance & versioning. Empty strings → None.
+        kind = fields.get("kind") or None
+        superseded_by = fields.get("superseded_by") or None
+        derived_from = self._parse_list_field(fields.get("derived_from")) or None
+        # confidence: the unscored sentinel (>= 1.0) reads back as None (unscored),
+        # never as a real score. A real score is in [0, 1].
+        confidence: float | None = None
+        _conf_raw = fields.get("confidence_idx")
+        if _conf_raw is not None:
+            try:
+                _conf_val = float(_conf_raw)
+                if 0.0 <= _conf_val <= 1.0:
+                    confidence = _conf_val
+            except (ValueError, TypeError):
+                confidence = None
+
         return MemoryRecordResult(
             text=fields.get("text", ""),
             id=fields.get("id_", ""),
@@ -532,6 +612,13 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
             source_channel=source_channel,
             visibility=visibility,
             stale_after=stale_after,
+            kind=kind,
+            confidence=confidence,
+            derived_from=derived_from,
+            observed_at=observed_at,
+            valid_from=valid_from,
+            valid_to=valid_to,
+            superseded_by=superseded_by,
             dist=score,
         )
 
@@ -644,7 +731,11 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
 
         await self._ensure_index()
 
-        from agent_memory_server.telemetry import Timer, record_counter, record_histogram
+        from agent_memory_server.telemetry import (
+            Timer,
+            record_counter,
+            record_histogram,
+        )
 
         with Timer() as t:
             try:
@@ -899,6 +990,8 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         source_channel: SourceChannel | None = None,
         visibility: VisibilityFilter | None = None,
         stale_after: StaleAfter | None = None,
+        kind: Kind | None = None,
+        min_confidence: MinConfidence | None = None,
         distance_threshold: float | None = None,
         server_side_recency: bool | None = None,
         recency_params: dict | None = None,
@@ -917,7 +1010,12 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         embedding models handle poorly.
         """
         from agent_memory_server.config import settings
-        from agent_memory_server.telemetry import Timer, record_counter, record_histogram, record_metric
+        from agent_memory_server.telemetry import (
+            Timer,
+            record_counter,
+            record_histogram,
+            record_metric,
+        )
 
         _search_timer = Timer()
         _search_timer.__enter__()
@@ -942,6 +1040,8 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
                 source_channel=source_channel,
                 visibility=visibility,
                 stale_after=stale_after,
+                kind=kind,
+                min_confidence=min_confidence,
             )
 
             # If server-side recency is requested, attempt aggregation path first
