@@ -417,8 +417,9 @@ class TestSourceUserNameInPrompts:
         ) as mock_create:
             await strategy.extract_memories("I love rowing")
             prompt = mock_create.call_args[1]["messages"][0]["content"]
-            # When no source_user_name, "User" is used as the name
-            assert "The application user is: User" in prompt
+            # When no source_user_name, "User" is used as the name.
+            # (Prompt reworded 2026-06-20 for subject attribution — speaker label.)
+            assert "The application user (the SPEAKER) is: User" in prompt
 
     @pytest.mark.asyncio
     async def test_summary_prompt_contains_real_name(self):

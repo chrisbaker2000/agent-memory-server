@@ -1,6 +1,7 @@
 """Memory extraction strategies for configurable long-term memory processing."""
 
 import json
+import os
 from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Any
@@ -19,6 +20,57 @@ from agent_memory_server.prompt_security import (
 
 
 logger = get_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Family roster for subject attribution (root-cause fix, 2026-06-20).
+# The discrete extraction prompt centered every fact on the SPEAKER ({user_name}),
+# so a fact like "my son Christian is a lightweight rower" became "Chris Baker is
+# a lightweight rower". Surfacing the household roster + a subject-attribution
+# rule lets the extractor attribute facts to the person they are ABOUT.
+# ---------------------------------------------------------------------------
+_FAMILY_CONTEXT_CACHE: str | None = None
+
+# Relationship phrasing per family.json role, relative to the admin/speaker.
+_ROLE_RELATION = {
+    "admin": "the application user / primary speaker",
+    "partner": "the speaker's spouse",
+    "child": "the speaker's child",
+    "extended": "extended family",
+}
+
+
+def _load_family_context() -> str:
+    """Build a roster of known household people for the extraction prompt.
+
+    Read from ``~/.openclaw/family.json``. Cached after first load. Returns an
+    empty string if the registry is unavailable (extraction still works, just
+    without the roster hint).
+    """
+    global _FAMILY_CONTEXT_CACHE
+    if _FAMILY_CONTEXT_CACHE is not None:
+        return _FAMILY_CONTEXT_CACHE
+    lines: list[str] = []
+    try:
+        path = os.path.expanduser("~/.openclaw/family.json")
+        with open(path) as f:
+            users = (json.load(f) or {}).get("users", {})
+        for u in users.values():
+            display = u.get("displayName")
+            if not display:
+                continue
+            role = u.get("role", "extended")
+            # Immediate Baker family carries the Baker surname; extended members
+            # may not, so use the first name alone to avoid asserting a wrong one.
+            full = (
+                f"{display} Baker" if role in ("admin", "partner", "child") else display
+            )
+            lines.append(f"- {full} — {_ROLE_RELATION.get(role, 'known person')}")
+    except Exception:
+        _FAMILY_CONTEXT_CACHE = ""
+        return ""
+    _FAMILY_CONTEXT_CACHE = "\n".join(lines)
+    return _FAMILY_CONTEXT_CACHE
 
 
 class BaseMemoryStrategy(ABC):
@@ -82,7 +134,12 @@ class DiscreteMemoryStrategy(BaseMemoryStrategy):
 
     CURRENT CONTEXT:
     Current date and time: {current_datetime}
-    The application user is: {user_name}
+    The application user (the SPEAKER) is: {user_name}
+
+    KNOWN PEOPLE — the speaker often states facts ABOUT other people (their
+    spouse, children, relatives). Attribute each fact to the person it is ABOUT,
+    who is frequently NOT the speaker:
+    {family_context}
 
     Extract two types of memories:
     1. EPISODIC: Memories about specific episodes in time.
@@ -99,6 +156,8 @@ class DiscreteMemoryStrategy(BaseMemoryStrategy):
        - "I told her about it" → "{user_name} told colleague about it" (if "her" refers to a colleague)
        - "Her experience is valuable" → "{user_name}'s experience is valuable" (if "her" refers to the user)
        - "My name is Alice and I prefer tea" → "{user_name} prefers tea"
+       - "My son Christian is a lightweight rower" → "Christian Baker is a lightweight rower" (the fact is about the SON — do NOT write "{user_name} is a lightweight rower")
+       - "My wife loves hiking" → "<wife's name from KNOWN PEOPLE> loves hiking" (NOT "{user_name} loves hiking")
        - NEVER leave pronouns unresolved - always replace with the specific person's name
 
     2. TEMPORAL REFERENCES: Convert relative time expressions to absolute dates/times using the current datetime provided above
@@ -150,6 +209,7 @@ class DiscreteMemoryStrategy(BaseMemoryStrategy):
     5. MANDATORY: Replace every instance of "he/she/they/him/her/them/his/hers/theirs" with the actual person's name.
     6. MANDATORY: Replace possessive pronouns like "her experience" with "{user_name}'s experience" (if "her" refers to the user).
     7. If you cannot determine what a contextual reference refers to, either omit that memory or use generic terms like "someone" instead of ungrounded pronouns.
+    8. SUBJECT ATTRIBUTION (CRITICAL): {user_name} is the SPEAKER, not automatically the SUBJECT of a fact. When the text states something about another named person or relative (e.g. "my son Christian…", "my wife…", "Lindalee won…"), the SUBJECT of the extracted memory MUST be that person — resolve "my son/daughter/wife/husband" to their name using KNOWN PEOPLE above. Make {user_name} the subject ONLY when the fact is genuinely about the speaker themselves. NEVER copy {user_name} onto a fact that is about someone else (e.g. do not turn "my son is a lightweight rower" into "{user_name} is a lightweight rower").
 
     Message:
     {message}
@@ -176,6 +236,7 @@ class DiscreteMemoryStrategy(BaseMemoryStrategy):
             top_k_topics=settings.top_k_topics,
             current_datetime=datetime.now().strftime("%A, %B %d, %Y at %I:%M %p %Z"),
             user_name=user_name,
+            family_context=_load_family_context() or "(no roster available)",
         )
 
         async for attempt in AsyncRetrying(stop=stop_after_attempt(3)):
@@ -222,7 +283,12 @@ class SummaryMemoryStrategy(BaseMemoryStrategy):
 
     CURRENT CONTEXT:
     Current date and time: {current_datetime}
-    The application user is: {user_name}
+    The application user (the SPEAKER) is: {user_name}
+
+    KNOWN PEOPLE — the speaker often refers to other people (spouse, children,
+    relatives). Attribute facts/preferences to the person they are ABOUT, who is
+    frequently NOT the speaker:
+    {family_context}
 
     Create a summary that:
     1. Captures the main topics discussed
@@ -274,6 +340,7 @@ class SummaryMemoryStrategy(BaseMemoryStrategy):
             max_length=self.max_summary_length,
             current_datetime=datetime.now().strftime("%A, %B %d, %Y at %I:%M %p %Z"),
             user_name=user_name,
+            family_context=_load_family_context() or "(no roster available)",
         )
 
         async for attempt in AsyncRetrying(stop=stop_after_attempt(3)):
@@ -309,7 +376,12 @@ class UserPreferencesMemoryStrategy(BaseMemoryStrategy):
 
     CURRENT CONTEXT:
     Current date and time: {current_datetime}
-    The application user is: {user_name}
+    The application user (the SPEAKER) is: {user_name}
+
+    KNOWN PEOPLE — the speaker often states preferences ABOUT other people
+    (spouse, children, relatives). Attribute each preference to the person it is
+    ABOUT, who is frequently NOT the speaker:
+    {family_context}
 
     Focus on extracting:
     1. User preferences (likes/dislikes, preferred options)
@@ -373,6 +445,7 @@ class UserPreferencesMemoryStrategy(BaseMemoryStrategy):
             message=text,
             current_datetime=datetime.now().strftime("%A, %B %d, %Y at %I:%M %p %Z"),
             user_name=user_name,
+            family_context=_load_family_context() or "(no roster available)",
         )
 
         async for attempt in AsyncRetrying(stop=stop_after_attempt(3)):
