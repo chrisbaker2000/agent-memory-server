@@ -40,6 +40,7 @@ from agent_memory_server.models import (
     MemoryRecordResult,
     MemoryRecordResults,
 )
+from agent_memory_server.utils.embed_verify import verify_embedding_order
 from agent_memory_server.utils.recency import generate_memory_hash, rerank_with_recency
 from agent_memory_server.utils.redis_query import RecencyAggregationQuery
 
@@ -764,6 +765,34 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
                 # Generate embeddings for all texts
                 texts = [memory.text for memory in memories]
                 embeddings = await self.embeddings.aembed_documents(texts)
+
+                # Embedding-order verification (C2): a batched embed that
+                # silently reordered its result would write the wrong vector onto
+                # the wrong record — the zip(strict=True) below catches a length
+                # mismatch but NOT a reorder. Only meaningful for real batches
+                # (a single record cannot be reordered). A confirmed reorder
+                # raises EmbeddingOrderError and aborts the write (fail-closed);
+                # a transient re-embed failure returns False (logged, proceed).
+                from agent_memory_server.config import settings as _settings
+
+                if _settings.memory_verify_embed_order and len(memories) > 1:
+                    # Re-embed singles via the SAME document task path as the
+                    # batch (nomic applies a different prefix to query text).
+                    async def _embed_one_document(text: str) -> list[float]:
+                        result = await self.embeddings.aembed_documents([text])
+                        return result[0] if result else []
+
+                    verified = await verify_embedding_order(
+                        texts,
+                        embeddings,
+                        embed_single=_embed_one_document,
+                        log_context="[add_memories]",
+                    )
+                    if not verified:
+                        logger.warning(
+                            "[add_memories] embedding-order check could not "
+                            "complete; persisting batch unverified"
+                        )
 
                 # Build data dicts with embeddings
                 data_list = []

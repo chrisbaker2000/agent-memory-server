@@ -590,6 +590,18 @@ Optimized query:"""
     memory_reference_protection_enabled: bool = True
     memory_operator_token: str | None = None
 
+    # Embedding-order verification (C2, ported from wfr-memory-commons
+    # embed_verify.py). add_memories batch-embeds and zip(strict=True)s the
+    # result onto records — strict zip catches a length mismatch but NOT a
+    # silent reorder by the provider (wrong vector on wrong record, invisible at
+    # the boundary). When enabled, a multi-record store re-embeds a small sample
+    # and cosine-compares against the batched vectors; a confirmed reorder fails
+    # the write closed (the corrupted batch is never persisted). Default OFF —
+    # the hot path does not pay the extra ~3 embeds per multi-record batch unless
+    # an operator opts in (e.g. to audit a provider). Single-record stores are
+    # never checked (a batch of one cannot be reordered).
+    memory_verify_embed_order: bool = False
+
     # Compaction settings
     # Set to 0 to disable automatic compaction entirely.
     # Previously 10 (every 10 min). Disabled 2026-03-10 because the semantic
