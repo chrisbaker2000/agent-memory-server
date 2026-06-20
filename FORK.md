@@ -33,7 +33,7 @@ A fork of [redis/agent-memory-server](https://github.com/redis/agent-memory-serv
 
 6. **Extraction pipeline** (`extraction.py`) — `_resolve_parent_attribution()` copies parent's attribution to child memories. `clean_entities()` quality-filters entities (stop words, URLs, hex IDs, variant dedup). `enforce_topics()` enforces controlled vocabulary with synonym mapping and deterministic longest-first substring matching. Vocabulary loaded from `~/.openclaw/config/memory-vocabulary.json`.
 
-7. **Forgetting pipeline** (`long_term_memory.py`) — `select_ids_for_forgetting()` checks `stale_after` and deletes expired memories (pinned exempt). Configurable via `stale_after_cleanup_enabled`.
+7. **Forgetting pipeline** (`long_term_memory.py`) — `select_ids_for_forgetting()` checks `stale_after` and deletes expired memories (pinned exempt). Configurable via `stale_after_cleanup_enabled`. **Deployment note (2026-06-20):** the *deletion* path runs only via `periodic_forget_long_term_memories`, which is registered ONLY when Docket is enabled (`docket_tasks.py` early-returns when `use_docket=False`). This deployment runs `USE_DOCKET=false`, so stale_after is **flag-only** here: the nightly `memory-maintenance.py` `phase_stale_flag` tags past-due records with `stale_flagged` for operator review and never deletes them — consistent with the standing "never auto-destroy memories" principle (Docket was disabled after it destroyed ~2,700 memories in March 2026). This is intentional, not dormant; do not wire auto-deletion without explicit sign-off.
 
 8. **Conflict detection** (`long_term_memory.py`, `api.py`) — `detect_similar_memories()` searches without merging. `POST /v1/long-term-memory/?detect_conflicts=true` returns similar memories for caller-driven dedup.
 
