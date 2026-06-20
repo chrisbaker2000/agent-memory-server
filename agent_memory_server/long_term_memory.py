@@ -51,6 +51,11 @@ from agent_memory_server.models import (
 )
 from agent_memory_server.telemetry import record_counter
 from agent_memory_server.utils.content_security import apply_content_security
+from agent_memory_server.utils.content_trust import (
+    ReferenceProtectedError,
+    TrustLevel,
+    is_reference_protected_mutation,
+)
 from agent_memory_server.utils.keys import Keys
 from agent_memory_server.utils.recency import (
     _days_between,
@@ -2448,12 +2453,64 @@ async def promote_working_memory_to_long_term(
     return promoted_count
 
 
+def _reference_protection_active(caller_trust_level: TrustLevel | None) -> bool:
+    """Return True iff the reference-protection guard should run for this call.
+
+    The guard runs only when ALL hold: it is enabled in config, an operator
+    token is actually configured (otherwise no record can be OPERATOR-tier — the
+    dormant default), a caller tier was supplied (an internal/library call passes
+    None and is trusted), and that caller is not already OPERATOR (which outranks
+    every record, so the per-record fetch would be wasted work).
+
+    Gating on ``memory_operator_token`` keeps normal agent deletes free of the
+    extra per-id fetch until an operator deliberately opts in.
+    """
+    return (
+        settings.memory_reference_protection_enabled
+        and bool(settings.memory_operator_token)
+        and caller_trust_level is not None
+        and caller_trust_level is not TrustLevel.OPERATOR
+    )
+
+
 async def delete_long_term_memories(
     ids: list[str],
+    *,
+    caller_trust_level: TrustLevel | None = None,
 ) -> int:
     """
     Delete long-term memories by ID.
+
+    Args:
+        ids: Memory IDs to delete.
+        caller_trust_level: Server-resolved trust tier of the caller (C1). When
+            provided and the reference-protection guard is active, each target is
+            fetched and the whole operation is refused (no record deleted) if any
+            target out-ranks the caller — raising :class:`ReferenceProtectedError`.
+            ``None`` (the default, for internal/library callers) skips the guard.
     """
+    if _reference_protection_active(caller_trust_level):
+        blocked: list[str] = []
+        for memory_id in ids:
+            target = await get_long_term_memory_by_id(memory_id)
+            # A missing target is not protected — let the delete proceed (it is a
+            # no-op for that id) so the guard never masks a 404-shaped result.
+            if target is not None and is_reference_protected_mutation(
+                caller=caller_trust_level, record=target
+            ):
+                blocked.append(memory_id)
+        if blocked:
+            record_counter(
+                "memory_server.reference_protection.blocked",
+                value=float(len(blocked)),
+                attributes={"op": "delete", "caller": caller_trust_level.value},
+            )
+            logger.warning(
+                f"Reference-protected delete refused: caller="
+                f"{caller_trust_level.value}, blocked_ids={blocked}"
+            )
+            raise ReferenceProtectedError(blocked, caller_trust_level)
+
     db = await get_memory_vector_db()
     return await db.delete_memories(ids)
 
@@ -2617,6 +2674,7 @@ SUPERSEDE_TARGET_MISSING = "target_missing"
 SUPERSEDE_REPLACEMENT_MISSING = "replacement_missing"
 SUPERSEDE_SELF = "self_supersede"
 SUPERSEDE_CONFLICT = "conflict"
+SUPERSEDE_PROTECTED = "reference_protected"
 
 
 async def supersede_memory(
@@ -2625,6 +2683,7 @@ async def supersede_memory(
     *,
     require_replacement_exists: bool = True,
     force: bool = False,
+    caller_trust_level: TrustLevel | None = None,
 ) -> tuple[str, MemoryRecord | None]:
     """Mark a memory as superseded by a newer version (non-destructive versioning).
 
@@ -2642,6 +2701,10 @@ async def supersede_memory(
             is not present. Set False to allow forward-references.
         force: When True, overwrite an existing supersede link (the default
             refuses, returning ``conflict``, to keep versioning monotonic).
+        caller_trust_level: Server-resolved trust tier of the caller (C1). When
+            the reference-protection guard is active and the caller ranks below
+            the target, returns ``SUPERSEDE_PROTECTED`` and does not mutate.
+            ``None`` (internal callers) skips the guard.
 
     Returns:
         ``(status, updated_record_or_None)`` where status is one of the
@@ -2653,6 +2716,24 @@ async def supersede_memory(
     target = await get_long_term_memory_by_id(target_id)
     if not target:
         return SUPERSEDE_TARGET_MISSING, None
+
+    # Reference-record write protection (C1): a lower-trust caller cannot
+    # supersede a higher-trust (canonical) record. Checked after the target is
+    # fetched (so a missing target still 404s, not 403). Dormant unless an
+    # operator token is configured + a caller tier was resolved.
+    if _reference_protection_active(caller_trust_level) and (
+        is_reference_protected_mutation(caller=caller_trust_level, record=target)
+    ):
+        record_counter(
+            "memory_server.reference_protection.blocked",
+            value=1.0,
+            attributes={"op": "supersede", "caller": caller_trust_level.value},
+        )
+        logger.warning(
+            f"Reference-protected supersede refused: caller="
+            f"{caller_trust_level.value}, target_id={target_id}"
+        )
+        return SUPERSEDE_PROTECTED, target
 
     if require_replacement_exists:
         replacement = await get_long_term_memory_by_id(replacement_id)

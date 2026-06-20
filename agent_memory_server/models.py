@@ -407,6 +407,19 @@ class MemoryRecord(BaseModel):
             "(include_superseded=True surfaces them)."
         ),
     )
+    trust_level: str | None = Field(
+        default=None,
+        description=(
+            "Author-trust tier (reference-record write protection, C1). "
+            "SERVER-MANAGED: derived at write time from the operator-token check, "
+            "never accepted from client write payloads. None = lowest ('agent') "
+            "tier — legacy/unclassified records and all agent-path writes. "
+            "'operator' marks a canonical record an operator authored; an "
+            "agent-tier caller cannot supersede/delete it. Stored on the record "
+            "hash (returned via FT.SEARCH RETURN) but NOT indexed — no rebuild "
+            "needed. See utils/content_trust.py."
+        ),
+    )
 
 
 class ExtractedMemoryRecord(MemoryRecord):
@@ -571,6 +584,7 @@ Returns:
                 CreateMemoryRecordRequest,
                 LenientMemoryRecord,
             )
+            from agent_memory_server.utils.content_trust import TrustLevel
 
             # Apply default namespace for STDIO if not provided in memory entries
             processed_memories = []
@@ -588,8 +602,11 @@ Returns:
                 processed_memories.append(mem)
 
             payload = CreateMemoryRecordRequest(memories=processed_memories)
+            # MCP strategy create is an agent surface — stamp AGENT tier (C1).
             result = await core_create_long_term_memory(
-                payload, background_tasks=get_background_tasks()
+                payload,
+                background_tasks=get_background_tasks(),
+                caller_trust=TrustLevel.AGENT,
             )
             return result.model_dump() if hasattr(result, "model_dump") else result
 

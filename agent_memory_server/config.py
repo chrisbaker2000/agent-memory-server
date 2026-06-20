@@ -575,6 +575,21 @@ Optimized query:"""
     memory_secret_redaction_enabled: bool = True
     memory_injection_scan_enabled: bool = True
 
+    # Reference-record write protection — trust-rank mutation guard (C1, ported
+    # from wfr-memory-commons content_trust.py). When enabled, a lower-trust
+    # ('agent') caller cannot supersede/delete a higher-trust ('operator')
+    # record. The caller tier is derived server-side from the X-Operator-Token
+    # header checked against memory_operator_token; the agent path does not hold
+    # the token, so it cannot forge an OPERATOR write or escape the gate.
+    #
+    # DORMANT BY DEFAULT: with memory_operator_token unset, no write is ever
+    # stamped OPERATOR, so the guard can never fire (record_trust_level → 'agent'
+    # for every record). Set MEMORY_OPERATOR_TOKEN and have operator scripts send
+    # X-Operator-Token to opt in. The _enabled flag is the kill switch for the
+    # guard logic itself even when a token is configured.
+    memory_reference_protection_enabled: bool = True
+    memory_operator_token: str | None = None
+
     # Compaction settings
     # Set to 0 to disable automatic compaction entirely.
     # Previously 10 (every 10 min). Disabled 2026-03-10 because the semantic

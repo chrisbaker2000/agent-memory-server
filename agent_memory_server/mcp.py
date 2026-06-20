@@ -42,16 +42,17 @@ from agent_memory_server.models import (
     MemoryPromptRequest,
     MemoryPromptResponse,
     MemoryRecord,
-    StoreMemoryResponse,
     MemoryRecordResults,
     MemoryStrategyConfig,
     MemoryTypeEnum,
     ModelNameLiteral,
     SearchRequest,
+    StoreMemoryResponse,
     WorkingMemory,
     WorkingMemoryRequest,
     WorkingMemoryResponse,
 )
+from agent_memory_server.utils.content_trust import TrustLevel
 
 
 logger = logging.getLogger(__name__)
@@ -454,8 +455,12 @@ async def create_long_term_memories(
             mem.user_id = settings.default_mcp_user_id
 
     payload = CreateMemoryRecordRequest(memories=memories)
+    # MCP is the agent surface (no operator token) — write as AGENT tier so the
+    # MCP path can never mint an OPERATOR (reference-protected) record (C1).
     return await core_create_long_term_memory(
-        payload, background_tasks=get_background_tasks()
+        payload,
+        background_tasks=get_background_tasks(),
+        caller_trust=TrustLevel.AGENT,
     )
 
 
@@ -1198,7 +1203,13 @@ async def delete_long_term_memories(
     if not settings.long_term_memory:
         raise ValueError("Long-term memory is disabled")
 
-    return await core_delete_long_term_memory(memory_ids=memory_ids)
+    # MCP is the agent surface — pass AGENT tier explicitly (the route's
+    # Depends() default is not resolved on a direct call) so the reference-
+    # protection guard sees a real tier, and so the agent cannot delete an
+    # operator-tier (canonical) record via MCP (C1).
+    return await core_delete_long_term_memory(
+        memory_ids=memory_ids, caller_trust=TrustLevel.AGENT
+    )
 
 
 @mcp_app.tool()

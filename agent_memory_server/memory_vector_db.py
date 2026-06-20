@@ -360,6 +360,9 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         "valid_from",
         "valid_to",
         "superseded_by",
+        # Reference-record write protection (C1). Returned from the hash even
+        # though it is not indexed, so the mutation guard reads the stored tier.
+        "trust_level",
     ]
 
     def __init__(self, index: AsyncSearchIndex, embeddings: Any):
@@ -460,6 +463,9 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
             "kind": memory.kind or "",
             "superseded_by": memory.superseded_by or "",
             "derived_from": derived_from_str,
+            # Reference-record write protection (C1). Empty string = unset =
+            # lowest ('agent') tier on read. Stored on the hash but not indexed.
+            "trust_level": memory.trust_level or "",
             # confidence_idx is ALWAYS written: the real score when scored, else
             # the above-range sentinel so unscored records pass any min floor.
             "confidence_idx": (
@@ -576,6 +582,9 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         # Provenance & versioning. Empty strings → None.
         kind = fields.get("kind") or None
         superseded_by = fields.get("superseded_by") or None
+        # Reference-record write protection (C1). Empty string → None (= lowest
+        # tier via content_trust.record_trust_level's fail-safe).
+        trust_level = fields.get("trust_level") or None
         derived_from = self._parse_list_field(fields.get("derived_from")) or None
         # confidence: the unscored sentinel (>= 1.0) reads back as None (unscored),
         # never as a real score. A real score is in [0, 1].
@@ -619,6 +628,7 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
             valid_from=valid_from,
             valid_to=valid_to,
             superseded_by=superseded_by,
+            trust_level=trust_level,
             dist=score,
         )
 

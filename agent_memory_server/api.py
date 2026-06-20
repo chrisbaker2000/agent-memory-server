@@ -1,7 +1,7 @@
 from typing import Any
 
 import tiktoken
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from mcp.server.fastmcp.prompts import base
 from mcp.types import TextContent
 from ulid import ULID
@@ -53,12 +53,37 @@ from agent_memory_server.summary_views import (
     summarize_partition_for_view,
 )
 from agent_memory_server.tasks import create_task, get_task
+from agent_memory_server.utils.content_trust import (
+    ReferenceProtectedError,
+    TrustLevel,
+    derive_trust_level,
+    is_operator_token,
+)
 from agent_memory_server.utils.redis import get_redis_conn
 
 
 logger = get_logger(__name__)
 
 router = APIRouter()
+
+
+def resolve_caller_trust(
+    x_operator_token: str | None = Header(default=None),
+) -> TrustLevel:
+    """Resolve the caller's author-trust tier from the operator token (C1).
+
+    The single agent-unforgeable signal in this single-tenant, auth-disabled
+    deployment: a request that presents the configured ``X-Operator-Token`` is
+    OPERATOR-tier; everything else (the agent path) is AGENT-tier. Dormant when
+    no token is configured — every caller resolves to AGENT and the downstream
+    guard never fires.
+
+    Used as a FastAPI dependency on the mutating endpoints so it reads the header
+    without the route signatures handling it directly.
+    """
+    return derive_trust_level(
+        is_operator=is_operator_token(x_operator_token, settings.memory_operator_token)
+    )
 
 
 @router.post("/v1/long-term-memory/forget")
@@ -618,6 +643,7 @@ async def create_long_term_memory(
         "Returns similar_memories in the response for each stored memory. "
         "Does NOT merge — just reports conflicts for the caller to handle.",
     ),
+    caller_trust: TrustLevel = Depends(resolve_caller_trust),
     current_user: UserInfo = Depends(get_current_user),
 ):
     """
@@ -646,6 +672,17 @@ async def create_long_term_memory(
         # Ensure persisted_at is server-assigned and read-only for clients
         # Clear any client-provided persisted_at value
         memory.persisted_at = None
+
+        # Reference-record write protection (C1): trust_level is SERVER-MANAGED.
+        # Stamp it from the operator-token-derived caller tier, overriding any
+        # client-supplied value so the agent path can never forge an OPERATOR
+        # (reference-protected) write. OPERATOR → "operator"; AGENT → None (the
+        # lowest tier; keeps the field empty for the 99% agent/extraction path).
+        memory.trust_level = (
+            TrustLevel.OPERATOR.value
+            if caller_trust is TrustLevel.OPERATOR
+            else None
+        )
 
     # Conflict detection: synchronous search for similar memories before indexing
     similar_memories_map: dict[str, list[SimilarMemoryInfo]] | None = None
@@ -829,6 +866,7 @@ async def search_long_term_memory(
 @router.delete("/v1/long-term-memory", response_model=AckResponse)
 async def delete_long_term_memory(
     memory_ids: list[str] = Query(default=[], alias="memory_ids"),
+    caller_trust: TrustLevel = Depends(resolve_caller_trust),
     current_user: UserInfo = Depends(get_current_user),
 ):
     """
@@ -836,11 +874,26 @@ async def delete_long_term_memory(
 
     Args:
         memory_ids: List of memory IDs to delete (passed as query parameters)
+
+    Raises:
+        HTTPException: 403 if any target is a reference-protected (higher-trust)
+            record the caller may not delete — no record is deleted in that case.
     """
     if not settings.long_term_memory:
         raise HTTPException(status_code=400, detail="Long-term memory is disabled")
 
-    count = await long_term_memory.delete_long_term_memories(ids=memory_ids)
+    try:
+        count = await long_term_memory.delete_long_term_memories(
+            ids=memory_ids, caller_trust_level=caller_trust
+        )
+    except ReferenceProtectedError as e:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Reference-protected: caller may not delete higher-trust "
+                f"record(s): {e.blocked_ids}"
+            ),
+        ) from e
     return AckResponse(status=f"ok, deleted {count} memories")
 
 
@@ -950,6 +1003,7 @@ async def update_long_term_memory(
 async def supersede_long_term_memory(
     memory_id: str,
     payload: SupersedeMemoryRequest,
+    caller_trust: TrustLevel = Depends(resolve_caller_trust),
     current_user: UserInfo = Depends(get_current_user),
 ):
     """Supersede a memory with a newer version (non-destructive versioning).
@@ -969,11 +1023,20 @@ async def supersede_long_term_memory(
         payload.replacement_id,
         require_replacement_exists=payload.require_replacement_exists,
         force=payload.force,
+        caller_trust_level=caller_trust,
     )
 
     if status == long_term_memory.SUPERSEDE_SELF:
         raise HTTPException(
             status_code=400, detail="A memory cannot supersede itself"
+        )
+    if status == long_term_memory.SUPERSEDE_PROTECTED:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Reference-protected: caller may not supersede higher-trust "
+                f"record {memory_id}"
+            ),
         )
     if status == long_term_memory.SUPERSEDE_TARGET_MISSING:
         raise HTTPException(
