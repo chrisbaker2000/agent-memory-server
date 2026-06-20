@@ -12,6 +12,7 @@ from tenacity.stop import stop_after_attempt
 from agent_memory_server.config import settings
 from agent_memory_server.llm import LLMClient
 from agent_memory_server.logging import get_logger
+from agent_memory_server.telemetry import record_counter
 from agent_memory_server.prompt_security import (
     PromptSecurityError,
     secure_format_prompt,
@@ -51,8 +52,8 @@ def _load_family_context() -> str:
     if _FAMILY_CONTEXT_CACHE is not None:
         return _FAMILY_CONTEXT_CACHE
     lines: list[str] = []
+    path = os.path.expanduser("~/.openclaw/family.json")
     try:
-        path = os.path.expanduser("~/.openclaw/family.json")
         with open(path) as f:
             users = (json.load(f) or {}).get("users", {})
         for u in users.values():
@@ -66,9 +67,33 @@ def _load_family_context() -> str:
                 f"{display} Baker" if role in ("admin", "partner", "child") else display
             )
             lines.append(f"- {full} — {_ROLE_RELATION.get(role, 'known person')}")
-    except Exception:
+    except Exception as exc:
+        # Fail LOUD: a missing/corrupt roster silently degrades extraction to
+        # speaker-centric attribution — the exact class of the 2026-06-20 bug
+        # where family members' facts were mis-attributed to the speaker. Surface
+        # it (WARN + SigNoz counter) so the degradation is observable, not silent.
+        logger.warning(
+            "family roster unavailable at %s (%s) — subject-attribution degraded "
+            "to speaker-centric extraction until restored",
+            path,
+            exc,
+        )
+        record_counter(
+            "memory_server.family_roster.unavailable",
+            attributes={"reason": "load_error"},
+        )
         _FAMILY_CONTEXT_CACHE = ""
         return ""
+    if not lines:
+        logger.warning(
+            "family roster at %s yielded 0 named people — subject-attribution "
+            "degraded to speaker-centric extraction",
+            path,
+        )
+        record_counter(
+            "memory_server.family_roster.unavailable",
+            attributes={"reason": "empty"},
+        )
     _FAMILY_CONTEXT_CACHE = "\n".join(lines)
     return _FAMILY_CONTEXT_CACHE
 

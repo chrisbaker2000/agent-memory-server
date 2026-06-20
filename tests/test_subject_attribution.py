@@ -106,3 +106,45 @@ def test_preferences_prompt_formats():
         family_context=_load_family_context(),
     )
     assert "KNOWN PEOPLE" in out
+
+
+# --- A10b: fail-loud when the family roster is unavailable/empty ---------------
+# A missing/corrupt roster silently degrades extraction to speaker-centric
+# attribution (the 2026-06-20 mis-attribution class). _load_family_context now
+# WARNs + emits memory_server.family_roster.unavailable so it is observable.
+
+
+def test_family_context_fails_loud_when_roster_missing(tmp_path, monkeypatch):
+    import agent_memory_server.memory_strategies as ms
+
+    calls: list[tuple[str, dict]] = []
+    monkeypatch.setattr(ms, "record_counter", lambda name, **kw: calls.append((name, kw)))
+    monkeypatch.setattr(ms.os.path, "expanduser", lambda _p: str(tmp_path / "nope.json"))
+    monkeypatch.setattr(ms, "_FAMILY_CONTEXT_CACHE", None)
+
+    assert ms._load_family_context() == ""
+    assert any(
+        name == "memory_server.family_roster.unavailable"
+        and kw.get("attributes", {}).get("reason") == "load_error"
+        for name, kw in calls
+    )
+
+
+def test_family_context_fails_loud_when_roster_empty(tmp_path, monkeypatch):
+    import json as _json
+
+    import agent_memory_server.memory_strategies as ms
+
+    roster_file = tmp_path / "family.json"
+    roster_file.write_text(_json.dumps({"users": {}}))
+    calls: list[tuple[str, dict]] = []
+    monkeypatch.setattr(ms, "record_counter", lambda name, **kw: calls.append((name, kw)))
+    monkeypatch.setattr(ms.os.path, "expanduser", lambda _p: str(roster_file))
+    monkeypatch.setattr(ms, "_FAMILY_CONTEXT_CACHE", None)
+
+    assert ms._load_family_context() == ""
+    assert any(
+        name == "memory_server.family_roster.unavailable"
+        and kw.get("attributes", {}).get("reason") == "empty"
+        for name, kw in calls
+    )
