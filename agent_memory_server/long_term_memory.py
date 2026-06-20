@@ -1728,6 +1728,15 @@ async def search_long_term_memories(
                 f"{outcome.dropped_count}/{len(results.memories)} weak-tail results "
                 f"(floor={_floor:.3f}, query={text[:80]!r})"
             )
+            # Emit to SigNoz so the gate's drop rate is observable — the over-
+            # trimming risk FORK.md flags (a gate that silently eats conceptual
+            # recall is invisible otherwise). `shadow` distinguishes would-drop
+            # from actually-dropped so a shadow evaluation can be compared.
+            record_counter(
+                "memory_server.recall_relevance_gate.dropped",
+                value=float(outcome.dropped_count),
+                attributes={"shadow": str(outcome.shadow).lower()},
+            )
         if not outcome.shadow and outcome.dropped_count:
             kept = set(outcome.kept_indices)
             results.memories = [m for i, m in enumerate(results.memories) if i in kept]

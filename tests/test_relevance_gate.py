@@ -174,3 +174,22 @@ def test_gate_aggressive_floor_still_keeps_overlap():
     # idx3 (no overlap, dist 0.10 but floor 0.0 so not strong) → drop.
     assert out.dropped_indices == (1, 3)
     assert out.kept_indices == (0, 2)
+
+
+# --- B2: the gate's drop count is emitted to SigNoz (observability lock) -------
+# The gate can silently over-trim conceptual recall (the risk FORK.md flags), so
+# search_long_term_memories emits memory_server.recall_relevance_gate.dropped.
+# This source-level lock guards the metric against accidental removal (the drop
+# logic itself is covered by the evaluate_result / apply_relevance_gate tests).
+
+
+def test_recall_relevance_gate_emits_drop_counter():
+    import pathlib
+
+    src = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "agent_memory_server"
+        / "long_term_memory.py"
+    ).read_text()
+    assert "memory_server.recall_relevance_gate.dropped" in src
+    assert "outcome.dropped_count" in src
