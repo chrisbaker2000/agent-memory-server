@@ -537,8 +537,12 @@ Optimized query:"""
     # recall for short names, project titles, and proper nouns that embedding models
     # handle poorly. Text search uses the existing TEXT index on the `text` field.
     hybrid_search_enabled: bool = True
-    hybrid_search_rrf_k: int = 60  # Standard RRF constant; higher = more weight to top ranks
-    hybrid_search_text_results_multiplier: int = 3  # Fetch N * limit results from each source
+    hybrid_search_rrf_k: int = (
+        60  # Standard RRF constant; higher = more weight to top ranks
+    )
+    hybrid_search_text_results_multiplier: int = (
+        3  # Fetch N * limit results from each source
+    )
 
     # Search-query length clamp. A pathologically long recall query (e.g. a
     # whole pasted document) is clamped to this many characters at the search
@@ -601,6 +605,26 @@ Optimized query:"""
     # an operator opts in (e.g. to audit a provider). Single-record stores are
     # never checked (a batch of one cannot be reordered).
     memory_verify_embed_order: bool = False
+
+    # Read/egress-side bulk-exfiltration volume guard (C5, ported from
+    # wfr-memory-commons egress_dlp.py; see utils/egress_guard.py). Per-request
+    # recall limit is already bounded, so the exfil vector is cross-request
+    # cumulative volume — a compromised plugin or runaway loop draining the corpus
+    # via repeated/offset-walking recalls. A single GLOBAL fixed-window Redis
+    # counter (single-tenant; no per-consumer keying) sums records RETURNED and
+    # flags when the window total exceeds the soft cap.
+    #   _enabled: run the guard. DEFAULT-ON but DETECT-ONLY — it only logs +
+    #       emits telemetry (memory_server.egress_guard.flagged); it NEVER blocks
+    #       a recall. Fail-open on any Redis error. Observe the baseline, tune the
+    #       cap, then consider enforcement in a later change.
+    #   _window_seconds / _max_records: fixed-window width + soft record cap. The
+    #       window is hard (not sliding), so a boundary-straddling burst can reach
+    #       ~2x the cap across two adjacent windows before flagging — tune
+    #       accordingly. Default 60s / 2000 records (mirrors the upstream
+    #       "1500 records/min stays under every request-rate bucket" anomaly).
+    memory_egress_guard_enabled: bool = True
+    memory_egress_guard_window_seconds: int = 60
+    memory_egress_guard_max_records: int = 2000
 
     # Compaction settings
     # Set to 0 to disable automatic compaction entirely.

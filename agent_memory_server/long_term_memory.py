@@ -56,6 +56,10 @@ from agent_memory_server.utils.content_trust import (
     TrustLevel,
     is_reference_protected_mutation,
 )
+from agent_memory_server.utils.egress_guard import (
+    config_from_settings as egress_config_from_settings,
+    record_and_check as egress_record_and_check,
+)
 from agent_memory_server.utils.keys import Keys
 from agent_memory_server.utils.recency import (
     _days_between,
@@ -103,7 +107,7 @@ def _parse_extraction_response_with_fallback(content: str, logger) -> dict:
         # If the greedy capture produces invalid JSON (extra trailing content),
         # we fall back to non-greedy as a last resort.
         for pattern in [
-            r'"memories"\s*:\s*\[(.*)\]',   # greedy — handles nested brackets
+            r'"memories"\s*:\s*\[(.*)\]',  # greedy — handles nested brackets
             r'"memories"\s*:\s*\[(.*?)\]',  # non-greedy — last resort
         ]:
             memories_match = re.search(pattern, content, re.DOTALL)
@@ -119,7 +123,9 @@ def _parse_extraction_response_with_fallback(content: str, logger) -> dict:
 
         # All repair attempts failed
         logger.error("JSON repair attempt failed — no pattern matched or parsed")
-        raise json.JSONDecodeError("All repair attempts failed", content, 0)
+        # `from None`: the terminal repair-failure is the real error; chaining the
+        # last per-pattern JSONDecodeError (each a "try next pattern" miss) is noise.
+        raise json.JSONDecodeError("All repair attempts failed", content, 0) from None
 
 
 # Prompt for extracting memories from messages in working memory context
@@ -178,9 +184,9 @@ Extracted memories:
 logger = logging.getLogger(__name__)
 
 # Size guards — prevent mega-memory creation (added 2026-03-10)
-MAX_MEMORY_INPUT_CHARS = 500      # Skip merging memories larger than this
-MAX_MEMORY_OUTPUT_CHARS = 1000    # Cap merged output at this length
-MAX_ENTITY_COUNT = 30             # Skip memories with more entities than this
+MAX_MEMORY_INPUT_CHARS = 500  # Skip merging memories larger than this
+MAX_MEMORY_OUTPUT_CHARS = 1000  # Cap merged output at this length
+MAX_ENTITY_COUNT = 30  # Skip memories with more entities than this
 
 # Debounce configuration for thread-aware extraction (trailing-edge)
 # We use a "pending extraction" key to track when extraction should run
@@ -513,9 +519,7 @@ async def extract_memories_from_session_thread(
         inferred = resolve_user_from_session_id(session_id)
         if inferred:
             source_user = inferred
-            logger.info(
-                f"Inferred source_user={inferred} from session ID {session_id}"
-            )
+            logger.info(f"Inferred source_user={inferred} from session ID {session_id}")
 
     # Resolve display name for use in conversation labels and extraction prompt.
     # This ensures the LLM sees "[Chris Baker]: message" instead of "[USER]: message"
@@ -691,7 +695,9 @@ Merged memory:"""
     # Extract the merged content — reject empty LLM responses
     merged_text = (response.content or "").strip()
     if not merged_text:
-        logger.warning("LLM returned empty merge response, refusing to create empty memory")
+        logger.warning(
+            "LLM returned empty merge response, refusing to create empty memory"
+        )
         return None
 
     def coerce_to_float(m: MemoryRecord, key: str) -> float:
@@ -744,9 +750,7 @@ Merged memory:"""
 
     # visibility: most restrictive wins (higher rank = more restrictive)
     visibility_values = [getattr(m, "visibility", "everyone") for m in memories]
-    merged_visibility = max(
-        visibility_values, key=lambda v: VISIBILITY_RANK.get(v, 0)
-    )
+    merged_visibility = max(visibility_values, key=lambda v: VISIBILITY_RANK.get(v, 0))
 
     # stale_after: earliest (most conservative) non-None datetime
     stale_after_values = [
@@ -935,7 +939,7 @@ async def compact_long_term_memories(
                         )
 
                         if search_results and search_results[0] > 1:
-                            num_duplicates = search_results[0]
+                            search_results[0]
 
                             # Keep the newest memory (last in sorted results)
                             # and delete the rest
@@ -951,7 +955,9 @@ async def compact_long_term_memories(
                                 elem_str = (
                                     elem.decode()
                                     if isinstance(elem, bytes)
-                                    else str(elem) if elem is not None else ""
+                                    else str(elem)
+                                    if elem is not None
+                                    else ""
                                 )
                                 if elem_str.startswith(key_prefix):
                                     all_keys.append(elem_str)
@@ -1068,8 +1074,13 @@ async def compact_long_term_memories(
 
                     # Size guard: skip oversized memories from compaction
                     mem_text_len = len(memory_obj.text) if memory_obj.text else 0
-                    mem_entity_count = len(memory_obj.entities) if memory_obj.entities else 0
-                    if mem_text_len > MAX_MEMORY_INPUT_CHARS or mem_entity_count > MAX_ENTITY_COUNT:
+                    mem_entity_count = (
+                        len(memory_obj.entities) if memory_obj.entities else 0
+                    )
+                    if (
+                        mem_text_len > MAX_MEMORY_INPUT_CHARS
+                        or mem_entity_count > MAX_ENTITY_COUNT
+                    ):
                         logger.info(
                             f"Skipping compaction of oversized memory {memory_id}: "
                             f"{mem_text_len} chars, {mem_entity_count} entities"
@@ -1222,6 +1233,7 @@ def _normalize_source_user(source_user: str) -> str:
         try:
             import json
             import os
+
             family_path = os.path.expanduser("~/.openclaw/family.json")
             with open(family_path) as f:
                 family = json.load(f)
@@ -1233,11 +1245,15 @@ def _normalize_source_user(source_user: str) -> str:
                     last_name = user_obj.get("lastName", "Baker")
                     full_name = f"{display} {last_name}"
                     # Map every known variant to the canonical full name
-                    _FAMILY_NAME_MAP[key.lower()] = full_name                      # "chris"
-                    _FAMILY_NAME_MAP[display.lower()] = full_name                  # "chris"
-                    _FAMILY_NAME_MAP[full_name.lower()] = full_name                # "chris baker"
-                    _FAMILY_NAME_MAP[full_name.lower().replace(" ", "_")] = full_name  # "chris_baker"
-                    _FAMILY_NAME_MAP[full_name.lower().replace(" ", "")] = full_name   # "chrisbaker"
+                    _FAMILY_NAME_MAP[key.lower()] = full_name  # "chris"
+                    _FAMILY_NAME_MAP[display.lower()] = full_name  # "chris"
+                    _FAMILY_NAME_MAP[full_name.lower()] = full_name  # "chris baker"
+                    _FAMILY_NAME_MAP[full_name.lower().replace(" ", "_")] = (
+                        full_name  # "chris_baker"
+                    )
+                    _FAMILY_NAME_MAP[full_name.lower().replace(" ", "")] = (
+                        full_name  # "chrisbaker"
+                    )
         except Exception:
             pass  # No family registry — fall back to title-case
 
@@ -1358,7 +1374,7 @@ async def index_long_term_memories(
             last_newline = truncated.rfind("\n")
             best_break = max(last_period, last_newline)
             if best_break > MAX_MEMORY_OUTPUT_CHARS // 2:
-                truncated = truncated[:best_break + 1].rstrip()
+                truncated = truncated[: best_break + 1].rstrip()
             else:
                 truncated = truncated.rstrip()
             memory.text = truncated
@@ -1371,7 +1387,9 @@ async def index_long_term_memories(
         # External scripts writing directly to Redis can store ISO strings like
         # "2026-02-22" in the NUMERIC event_date field, causing Redis Search to
         # silently exclude the record from the index (orphan key).
-        if memory.event_date is not None and not isinstance(memory.event_date, datetime):
+        if memory.event_date is not None and not isinstance(
+            memory.event_date, datetime
+        ):
             memory = memory.model_copy()
             try:
                 memory.event_date = datetime.fromisoformat(str(memory.event_date))
@@ -1419,7 +1437,7 @@ async def index_long_term_memories(
         # full names ("Chris Baker"). The session-memory-bridge and other callers
         # sometimes pass slugified names. Normalize at ingestion so all stored
         # records have consistent human-readable source_user values.
-        if hasattr(memory, 'source_user') and memory.source_user:
+        if hasattr(memory, "source_user") and memory.source_user:
             normalized = _normalize_source_user(memory.source_user)
             if normalized != memory.source_user:
                 memory = memory.model_copy()
@@ -1542,6 +1560,40 @@ async def index_long_term_memories(
         )
 
 
+async def _observe_recall_egress(record_count: int) -> None:
+    """Feed a recall's returned-record count into the global egress volume guard
+    (C5; see utils/egress_guard.py) and, on a flagged window, log + emit
+    telemetry. DETECT-ONLY — never blocks recall; fail-open on any Redis error
+    (record_and_check swallows RedisError, and this wrapper swallows anything
+    else so the guard can never break the recall hot path). Called at every
+    recall return site (the filter-only listing AND the semantic-search path),
+    since the bulk-drain vector applies to both."""
+    try:
+        config = egress_config_from_settings()
+        if not config.enabled or record_count <= 0:
+            return
+        redis = await get_redis_conn()
+        verdict = await egress_record_and_check(redis, record_count, config=config)
+        if verdict.outcome == "flagged":
+            logger.warning(
+                f"[search_long_term_memories] egress guard FLAGGED — {verdict.reason} "
+                f"(this request returned {verdict.this_request} records)"
+            )
+            record_counter(
+                "memory_server.egress_guard.flagged",
+                value=1.0,
+                attributes={
+                    "window_total": verdict.window_total,
+                    "window_seconds": config.window_seconds,
+                    "max_records": config.max_records,
+                },
+            )
+    except Exception as exc:  # noqa: BLE001 — defense-in-depth must never break recall
+        logger.warning(
+            f"[search_long_term_memories] egress guard error (ignored): {exc}"
+        )
+
+
 async def search_long_term_memories(
     text: str,
     session_id: SessionId | None = None,
@@ -1599,7 +1651,7 @@ async def search_long_term_memories(
     # This enables patterns like: "return all memories for this user/namespace".
     if not (text or "").strip():
         db = await get_memory_vector_db()
-        return await db.list_memories(
+        listing = await db.list_memories(
             session_id=session_id,
             user_id=user_id,
             namespace=namespace,
@@ -1617,6 +1669,8 @@ async def search_long_term_memories(
             limit=limit,
             offset=offset,
         )
+        await _observe_recall_egress(len(listing.memories))
+        return listing
 
     # Search-query length clamp. A pathologically long recall query (a whole
     # pasted document, an over-stuffed conversation window) is clamped before
@@ -1771,6 +1825,10 @@ async def search_long_term_memories(
     logger.debug(
         f"[search_long_term_memories] OUTPUT - {results.total} results: {memory_previews}"
     )
+
+    # Egress volume guard (C5) — count records actually returned (post relevance
+    # gate + supersede hiding) into the global fixed-window counter. Detect-only.
+    await _observe_recall_egress(len(results.memories))
 
     return results
 
@@ -2025,13 +2083,15 @@ async def detect_similar_memories(
     for m in search_result.memories:
         if m.id == memory.id:
             continue
-        similar.append({
-            "id": m.id,
-            "text": m.text[:500] if m.text else "",
-            "dist": m.dist,
-            "topics": m.topics,
-            "entities": m.entities,
-        })
+        similar.append(
+            {
+                "id": m.id,
+                "text": m.text[:500] if m.text else "",
+                "dist": m.dist,
+                "topics": m.topics,
+                "entities": m.entities,
+            }
+        )
 
     return similar
 
@@ -2138,7 +2198,8 @@ async def deduplicate_by_semantic_search(
 
     # Size guard: filter out oversized similar memories from merge candidates
     vector_search_result = [
-        m for m in vector_search_result
+        m
+        for m in vector_search_result
         if (len(m.text) if m.text else 0) <= MAX_MEMORY_INPUT_CHARS
         and (len(m.entities) if m.entities else 0) <= MAX_ENTITY_COUNT
     ]
@@ -2154,9 +2215,7 @@ async def deduplicate_by_semantic_search(
 
         # If merge was rejected (returned original memory), skip deletion
         if merged_memory.id == memory.id:
-            logger.info(
-                "Merge was rejected by size guard, keeping all memories as-is"
-            )
+            logger.info("Merge was rejected by size guard, keeping all memories as-is")
             return memory, False
 
         # Delete the similar memories using the database
@@ -2317,7 +2376,9 @@ async def promote_working_memory_to_long_term(
                 memory.source_user = session_source_user
             if not memory.source_channel and session_source_channel:
                 memory.source_channel = session_source_channel
-            if (not memory.visibility or memory.visibility == "everyone") and session_visibility != "everyone":
+            if (
+                not memory.visibility or memory.visibility == "everyone"
+            ) and session_visibility != "everyone":
                 memory.visibility = session_visibility
 
             # Check for id-based duplicates and handle accordingly
@@ -2782,7 +2843,7 @@ def _parse_stale_after(value: Any) -> datetime | None:
         return None
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=UTC)
-    if isinstance(value, (int, float)):
+    if isinstance(value, int | float):
         return datetime.fromtimestamp(value, tz=UTC)
     if isinstance(value, str):
         try:
