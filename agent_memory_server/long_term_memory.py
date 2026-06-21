@@ -1269,6 +1269,54 @@ def _normalize_source_user(source_user: str) -> str:
     return source_user
 
 
+def _coerce_event_date(value: Any) -> datetime | None:
+    """Normalize an event_date value to a datetime, or None.
+
+    External scripts writing directly to Redis can store ISO strings like
+    "2026-02-22" in the NUMERIC event_date field, which makes Redis Search
+    silently EXCLUDE the record from the index (an orphan key). Coerce at the
+    write funnel: a datetime passes through, a parseable ISO string is
+    converted, and anything unparseable (or None) becomes None rather than
+    corrupting the index. Pure + side-effect-free so it is directly testable.
+    """
+    if value is None or isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value))
+    except (ValueError, TypeError):
+        return None
+
+
+# "User"-as-person reference pattern. Matches "User <verb>" at the start of the
+# text or mid-sentence (after ", " / ". "), e.g. "User prefers …" or
+# "On March 14, User asked …". Keep this verb list aligned with
+# tests/memory/attribution.sh::check_no_user_prefix.
+_USER_VERB_PATTERN = (
+    r"(?:^|[,.]\s+)User\s+(?:is|was|has|had|does|did|prefers|likes|wants|"
+    r"mentioned|asked|enjoys|works|lives|loves|needs|feels|"
+    r"believes|thinks|participates|uses|values|gave|ordered|"
+    r"bought|tends|keeps|expressed|currently|also|recently|"
+    r"reported|said|told|requested|inquired|checked|noted|"
+    r"learned|started|stopped|stored|saved|added|removed|created|"
+    r"deleted|updated|visited|sent|received|replied|shared|"
+    r"confirmed|completed|finished|opened|closed|approved|rejected|"
+    r"wrote|read|bought|paid|owes|owns|plans|intends|knows)\b"
+)
+
+
+def _is_user_as_person(text: str) -> bool:
+    """True if `text` uses the generic literal "User" as a person reference.
+
+    Extraction paths that fail to resolve the speaker's real name emit "User"
+    as the fact subject ("User prefers dark mode"); storing it both
+    mis-attributes the fact and bypasses the attribution model, so such
+    memories are rejected at the write funnel. The leading "[tag]" envelope
+    is stripped before matching. Pure + side-effect-free for direct testing.
+    """
+    stripped = re.sub(r"^\[.*?\]\s*", "", text)
+    return bool(re.search(_USER_VERB_PATTERN, stripped))
+
+
 async def index_long_term_memories(
     memories: list[MemoryRecord | ExtractedMemoryRecord],
     redis_client: Redis | None = None,
@@ -1390,19 +1438,20 @@ async def index_long_term_memories(
         if memory.event_date is not None and not isinstance(
             memory.event_date, datetime
         ):
+            original_event_date = memory.event_date
+            coerced = _coerce_event_date(original_event_date)
             memory = memory.model_copy()
-            try:
-                memory.event_date = datetime.fromisoformat(str(memory.event_date))
+            memory.event_date = coerced
+            if coerced is not None:
                 logger.warning(
                     f"Converted string event_date to datetime for memory {memory.id}: "
-                    f"{memory.event_date}"
+                    f"{coerced}"
                 )
-            except (ValueError, TypeError):
+            else:
                 logger.warning(
                     f"Invalid event_date for memory {memory.id}, setting to None: "
-                    f"{memory.event_date!r}"
+                    f"{original_event_date!r}"
                 )
-                memory.event_date = None
 
         # "User" text guard: reject memories that use "User" as a person name.
         # This catches all extraction paths that fail to resolve the actual name.
@@ -1410,22 +1459,7 @@ async def index_long_term_memories(
         # 1. Text starts with "User <verb>" (after optional tag)
         # 2. "User <verb>" appears anywhere in the text as a mid-sentence person
         #    reference (e.g., "On March 14, User asked...")
-        _stripped = re.sub(r"^\[.*?\]\s*", "", memory.text)
-        _user_verb_pattern = (
-            r"(?:^|[,.]\s+)User\s+(?:is|was|has|had|does|did|prefers|likes|wants|"
-            r"mentioned|asked|enjoys|works|lives|loves|needs|feels|"
-            r"believes|thinks|participates|uses|values|gave|ordered|"
-            r"bought|tends|keeps|expressed|currently|also|recently|"
-            r"reported|said|told|requested|inquired|checked|noted|"
-            # Added 2026-04-14 after "User learned on April 5, 2026..."
-            # bypassed the earlier guard and reached production. Keep this
-            # list aligned with tests/memory/attribution.sh::check_no_user_prefix.
-            r"learned|started|stopped|stored|saved|added|removed|created|"
-            r"deleted|updated|visited|sent|received|replied|shared|"
-            r"confirmed|completed|finished|opened|closed|approved|rejected|"
-            r"wrote|read|bought|paid|owes|owns|plans|intends|knows)\b"
-        )
-        if re.search(_user_verb_pattern, _stripped):
+        if _is_user_as_person(memory.text):
             logger.warning(
                 f"Rejecting memory with 'User' as person reference "
                 f"(source_user={getattr(memory, 'source_user', None)}): "
