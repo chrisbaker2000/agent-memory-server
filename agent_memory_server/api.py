@@ -759,6 +759,7 @@ async def search_long_term_memory(
         "offset": payload.offset,
         "optimize_query": optimize_query,
         "include_superseded": payload.include_superseded,
+        "bypass_recall_filters": payload.bypass_recall_filters,
         **filters,
     }
 

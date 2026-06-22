@@ -891,6 +891,14 @@ class SearchRequest(BaseModel):
             "version. Default False hides them from recall."
         ),
     )
+    bypass_recall_filters: bool = Field(
+        default=False,
+        description=(
+            "If True, skip the recall relevance gate so a trusted 'list all' "
+            "caller (e.g. the curator full-corpus backup) reads the entire "
+            "corpus instead of the salient-term subset. Default False."
+        ),
+    )
     limit: int = Field(
         default=10,
         ge=1,
