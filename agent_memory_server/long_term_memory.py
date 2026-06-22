@@ -1384,10 +1384,15 @@ async def index_long_term_memories(
         if sec.injection_signals:
             # Flag-and-keep: surface for review, but store the record. The
             # load-bearing injection defense is the gateway's read-time handling.
+            # Log the SANITIZED/secret-redacted text (sec.text), never the raw input
+            # (LAB-65): the raw memory.text matched an injection signal and may carry
+            # attacker-controlled payloads or unredacted secrets — emitting it to logs is a
+            # re-injection / secret-leak vector. sec.text has secrets → [REDACTED] and
+            # control/bidi chars stripped.
             logger.warning(
                 f"Memory text matched injection signal(s) (flagged, not rejected): "
                 f"signals={list(sec.injection_signals)}, id={memory.id}, "
-                f"text={memory.text[:80]}..."
+                f"redacted_text={sec.text[:80]}..."
             )
             record_counter(
                 "memory_server.content_security.injection_flagged",
@@ -1403,8 +1408,7 @@ async def index_long_term_memories(
         # manager, extraction, promotion, plugin).
         if _is_noise_content(memory.text):
             logger.info(
-                f"Skipping noise memory: id={memory.id}, "
-                f"text={memory.text[:80]}...",
+                f"Skipping noise memory: id={memory.id}, text={memory.text[:80]}...",
             )
             continue
 

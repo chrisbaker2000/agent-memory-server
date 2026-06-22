@@ -105,7 +105,11 @@ async def lifespan(app: FastAPI):
             raise
 
     # Start telemetry flush thread
-    from agent_memory_server.telemetry import start as start_telemetry, stop as stop_telemetry
+    from agent_memory_server.telemetry import (
+        start as start_telemetry,
+        stop as stop_telemetry,
+    )
+
     start_telemetry()
 
     logger.info(
@@ -168,7 +172,9 @@ if __name__ == "__main__":
     on_start_logger(port)
     uvicorn.run(
         app,  # Using the app instance directly
-        host="0.0.0.0",
+        # Loopback by default (LAB-64) — this entrypoint is unauthenticated; binding
+        # 0.0.0.0 would expose the whole memory corpus on the LAN. Override via HOST env.
+        host=settings.host,
         port=port,
         reload=False,
     )

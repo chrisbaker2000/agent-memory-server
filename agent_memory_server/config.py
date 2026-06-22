@@ -383,6 +383,10 @@ class Settings(BaseSettings):
         """Return the merge model, falling back to the generation model."""
         return self.merge_model or self.generation_model
 
+    # REST API bind host. Defaults to loopback (LAB-64) — the server has no auth in the
+    # homelab deployment and must not be reachable off-host. Override via the HOST env var
+    # (e.g. HOST=0.0.0.0) only behind an authenticated proxy.
+    host: str = "127.0.0.1"
     port: int = 8000
     mcp_host: str = "0.0.0.0"
     mcp_port: int = 9000
