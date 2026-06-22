@@ -1657,6 +1657,7 @@ async def search_long_term_memories(
     limit: int = 10,
     offset: int = 0,
     optimize_query: bool = False,
+    bypass_recall_filters: bool = False,
 ) -> MemoryRecordResults:
     """
     Search for long-term memories using the pluggable memory vector database.
@@ -1809,7 +1810,15 @@ async def search_long_term_memories(
     # shadow mode logs what would drop without dropping. Applied against the
     # ORIGINAL query text (`text`) — the user's words, not the LLM-optimized
     # rewrite — since the gate measures lexical anchoring to what was asked.
-    if settings.recall_relevance_gate_enabled and results.memories:
+    # bypass_recall_filters: full-corpus enumeration (curator backup, LAB-281). The
+    # gate keys off the global setting and would otherwise trim every page of a
+    # text-anchored "list all" export down to the salient-term subset (~93/16976),
+    # so an opt-in per-request bypass lets a trusted caller read the whole corpus.
+    if (
+        not bypass_recall_filters
+        and settings.recall_relevance_gate_enabled
+        and results.memories
+    ):
         outcome = apply_relevance_gate(
             [(m.text, m.dist) for m in results.memories],
             text,
