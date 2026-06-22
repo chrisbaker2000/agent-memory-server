@@ -265,7 +265,11 @@ def migrate_working_memory(batch_size: int, dry_run: bool):
 
 @cli.command()
 @click.option("--port", default=settings.port, help="Port to run the server on")
-@click.option("--host", default="0.0.0.0", help="Host to run the server on")
+@click.option(
+    "--host",
+    default=settings.host,
+    help="Host to run the server on (default loopback; LAB-64). Pass --host 0.0.0.0 only behind an authenticated proxy.",
+)
 @click.option("--reload", is_flag=True, help="Enable auto-reload")
 @click.option(
     "--no-worker",
