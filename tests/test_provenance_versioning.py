@@ -16,7 +16,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import agent_memory_server.long_term_memory as ltm
+from agent_memory_server.config import settings
+from agent_memory_server.extraction import (
+    VALID_MEMORY_KINDS,
+    coerce_extracted_kind,
+)
 from agent_memory_server.filters import Kind, MinConfidence
+from agent_memory_server.memory_strategies import DiscreteMemoryStrategy
 from agent_memory_server.memory_vector_db import (
     CONFIDENCE_UNSCORED_SENTINEL,
     VALID_TO_SENTINEL,
@@ -252,10 +258,12 @@ def _result(id_, text, superseded_by=None):
 
 @pytest.mark.asyncio
 async def test_recall_hides_superseded_by_default():
-    db = _SearchDB([
-        _result("a", "current fact"),
-        _result("b", "old fact", superseded_by="a"),
-    ])
+    db = _SearchDB(
+        [
+            _result("a", "current fact"),
+            _result("b", "old fact", superseded_by="a"),
+        ]
+    )
     with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
         res = await ltm.search_long_term_memories(text="fact", limit=10)
     ids = {m.id for m in res.memories}
@@ -265,10 +273,12 @@ async def test_recall_hides_superseded_by_default():
 
 @pytest.mark.asyncio
 async def test_recall_include_superseded_surfaces_all():
-    db = _SearchDB([
-        _result("a", "current fact"),
-        _result("b", "old fact", superseded_by="a"),
-    ])
+    db = _SearchDB(
+        [
+            _result("a", "current fact"),
+            _result("b", "old fact", superseded_by="a"),
+        ]
+    )
     with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
         res = await ltm.search_long_term_memories(
             text="fact", limit=10, include_superseded=True
@@ -362,3 +372,227 @@ async def test_supersede_force_overrides_conflict():
         status, rec = await ltm.supersede_memory("t", "r", force=True)
     assert status == ltm.SUPERSEDE_OK
     assert rec.superseded_by == "r"
+
+
+# --- LAB-397: populate kind/confidence on extraction -----------------------
+# F0 (LAB-395) extended `kind` with epistemic opinion/belief and set extraction
+# confidence to the model-paraphrase tier (0.7), distinct from first-hand
+# (unscored) writes. These lock the schema + the extraction-stamping convention.
+
+
+def test_kind_literal_accepts_epistemic_values():
+    # The F0-added epistemic kinds must be accepted on MemoryRecord.
+    assert (
+        MemoryRecord(
+            id="o", text="Christian thinks rowing is boring", kind="opinion"
+        ).kind
+        == "opinion"
+    )
+    assert (
+        MemoryRecord(
+            id="b", text="Chris believes the QNAP is unreliable", kind="belief"
+        ).kind
+        == "belief"
+    )
+    # And the original four still work.
+    for k in ("fact", "event", "preference", "summary"):
+        assert MemoryRecord(id=k, text="t", kind=k).kind == k
+
+
+def test_valid_memory_kinds_matches_literal():
+    # The coercion allowlist must stay in lockstep with the model Literal.
+    assert {
+        "fact",
+        "event",
+        "preference",
+        "opinion",
+        "belief",
+        "summary",
+    } == VALID_MEMORY_KINDS
+
+
+def test_coerce_extracted_kind():
+    assert coerce_extracted_kind("opinion") == "opinion"
+    assert coerce_extracted_kind("belief") == "belief"
+    assert coerce_extracted_kind("fact") == "fact"
+    # Off-vocabulary / missing / wrong-type → None (read path treats None as 'fact').
+    assert coerce_extracted_kind("bogus") is None
+    assert coerce_extracted_kind(None) is None
+    assert coerce_extracted_kind(123) is None
+    assert coerce_extracted_kind("") is None
+    # Unhashable LLM output must NOT raise (a bare `in frozenset` would TypeError).
+    assert coerce_extracted_kind(["fact"]) is None
+    assert coerce_extracted_kind({"kind": "fact"}) is None
+    # Capitalized/padded LLM emissions normalize to the canonical lowercase value.
+    assert coerce_extracted_kind("Opinion") == "opinion"
+    assert coerce_extracted_kind("FACT ") == "fact"
+    assert coerce_extracted_kind("  Belief  ") == "belief"
+
+
+def test_extraction_confidence_default_is_scored():
+    # Extraction is a model paraphrase → SCORED (not the unscored first-hand tier).
+    assert settings.extraction_confidence == 0.7
+    assert 0.0 < settings.extraction_confidence < 1.0
+
+
+def test_extraction_confidence_bounded_at_config_boundary():
+    # A mis-set env must fail LOUD at config load (the boundary), not deep in
+    # extraction when stamped onto MemoryRecord.confidence (ge=0/le=1).
+    from agent_memory_server.config import Settings
+
+    with pytest.raises(ValueError):
+        Settings(extraction_confidence=1.5)
+    with pytest.raises(ValueError):
+        Settings(extraction_confidence=-0.1)
+
+
+def test_opinion_record_serializes_kind_tag_and_scored_confidence():
+    # An extracted opinion (kind=opinion, confidence=0.7) must serialize a real
+    # confidence_idx (NOT the unscored sentinel) and the kind TAG — so a
+    # min_confidence floor and an @kind:{opinion} filter both work on it.
+    db = _db()
+    m = MemoryRecord(
+        id="op1",
+        text="Christian thinks rowing is boring",
+        kind="opinion",
+        confidence=settings.extraction_confidence,
+    )
+    data = db._memory_to_data(m)
+    assert data["kind"] == "opinion"
+    assert data["confidence_idx"] == 0.7
+    assert data["confidence_idx"] != CONFIDENCE_UNSCORED_SENTINEL
+
+
+def test_discrete_prompt_emits_kind():
+    # The discrete extraction prompt must instruct the LLM to classify `kind`
+    # (with the epistemic values) and carry it in the example objects, else the
+    # live path would never populate the field.
+    p = DiscreteMemoryStrategy.EXTRACTION_PROMPT
+    assert "kind: str" in p
+    assert '"opinion"' in p and '"belief"' in p
+    assert '"kind": "preference"' in p  # example object carries kind
+    # The episodic (time-anchored) example must be labeled kind="event", NOT "fact"
+    # — an example contradicting the event-vs-fact rule would teach the LLM wrong.
+    assert '"type": "episodic",\n                "kind": "event"' in p
+    assert '"type": "episodic",\n                "kind": "fact"' not in p
+
+
+@pytest.mark.asyncio
+async def test_session_thread_extraction_stamps_kind_and_confidence():
+    """The LIVE auto-capture path (extract_memories_from_session_thread, which
+    hard-codes the discrete strategy) must stamp kind=coerce_extracted_kind(...)
+    and confidence=settings.extraction_confidence onto each constructed record."""
+    from types import SimpleNamespace
+
+    wm = SimpleNamespace(
+        messages=[
+            SimpleNamespace(role="user", content="Christian thinks rowing is boring")
+        ]
+    )
+
+    class _Strategy:
+        async def extract_memories(self, text, source_user_name=None):
+            return [
+                {
+                    "text": "Christian thinks rowing is boring",
+                    "type": "semantic",
+                    "kind": "opinion",
+                },
+                {
+                    "text": "Christian Baker is a lightweight rower",
+                    "type": "semantic",
+                },  # no kind
+                {"text": "bad kind ignored", "type": "semantic", "kind": "BOGUS"},
+            ]
+
+    with (
+        patch(
+            "agent_memory_server.working_memory.get_working_memory",
+            AsyncMock(return_value=wm),
+        ),
+        patch(
+            "agent_memory_server.memory_strategies.get_memory_strategy",
+            return_value=_Strategy(),
+        ),
+    ):
+        records = await ltm.extract_memories_from_session_thread(
+            session_id="test-session", source_user="chris"
+        )
+
+    assert len(records) == 3
+    # Every extracted record is stamped with the scored extraction-confidence tier.
+    assert all(r.confidence == settings.extraction_confidence for r in records)
+    # kind: emitted opinion kept; missing → None (reads as fact); off-vocab → None.
+    assert records[0].kind == "opinion"
+    assert records[1].kind is None
+    assert records[2].kind is None
+
+
+@pytest.mark.asyncio
+async def test_strategy_aware_extraction_stamps_kind_and_confidence():
+    """extract_memories_with_strategy must stamp confidence + a kind on each
+    record: the LLM-emitted kind when present (discrete), else the strategy's
+    invariant default (summary→summary, preferences→preference)."""
+    import agent_memory_server.extraction as ext
+
+    captured: list = []
+
+    async def _capture_index(memories, **kwargs):
+        captured.extend(memories)
+
+    class _Strategy:
+        def __init__(self, out):
+            self._out = out
+
+        async def extract_memories(self, text, source_user_name=None):
+            return self._out
+
+    fake_db = MagicMock()
+    fake_db.update_memories = AsyncMock(return_value=1)
+
+    # A 'summary'-strategy parent whose extracted memory carries NO kind → the
+    # invariant default ("summary") must be stamped (not left None).
+    parent = MemoryRecord(
+        id="msg1",
+        text="a long conversation",
+        memory_type="message",
+        extraction_strategy="summary",
+        extraction_strategy_config={},
+        discrete_memory_extracted="f",
+    )
+    # The LLM emits a CONFLICTING kind="fact"; the invariant summary default must
+    # OVERRIDE it (a summary is always a summary), not merely fill when absent.
+    strategy = _Strategy(
+        [{"text": "a concise summary", "type": "semantic", "kind": "fact"}]
+    )
+
+    with (
+        patch(
+            "agent_memory_server.memory_vector_db_factory.get_memory_vector_db",
+            AsyncMock(return_value=fake_db),
+        ),
+        patch(
+            "agent_memory_server.memory_strategies.get_memory_strategy",
+            return_value=strategy,
+        ),
+        patch(
+            "agent_memory_server.long_term_memory.index_long_term_memories",
+            _capture_index,
+        ),
+    ):
+        await ext.extract_memories_with_strategy(memories=[parent], deduplicate=False)
+
+    assert len(captured) == 1
+    assert captured[0].kind == "summary"  # invariant strategy default applied
+    assert captured[0].confidence == settings.extraction_confidence
+
+
+def test_default_kind_for_strategy():
+    from agent_memory_server.extraction import default_kind_for_strategy
+
+    assert default_kind_for_strategy("summary") == "summary"
+    assert default_kind_for_strategy("preferences") == "preference"
+    # Discrete kinds vary per memory → no invariant default.
+    assert default_kind_for_strategy("discrete") is None
+    assert default_kind_for_strategy(None) is None
+    assert default_kind_for_strategy("bogus") is None
