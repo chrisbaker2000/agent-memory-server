@@ -471,3 +471,7 @@ def test_discrete_prompt_emits_kind():
     assert "kind: str" in p
     assert '"opinion"' in p and '"belief"' in p
     assert '"kind": "preference"' in p  # example object carries kind
+    # The episodic (time-anchored) example must be labeled kind="event", NOT "fact"
+    # — an example contradicting the event-vs-fact rule would teach the LLM wrong.
+    assert '"type": "episodic",\n                "kind": "event"' in p
+    assert '"type": "episodic",\n                "kind": "fact"' not in p

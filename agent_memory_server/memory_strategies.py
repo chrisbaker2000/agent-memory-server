@@ -274,7 +274,7 @@ class DiscreteMemoryStrategy(BaseMemoryStrategy):
             }},
             {{
                 "type": "episodic",
-                "kind": "fact",
+                "kind": "event",
                 "text": "Trek discontinued the Trek 520 steel touring bike in 2023",
                 "topics": ["travel", "bicycle"],
                 "entities": ["Trek", "Trek 520 steel touring bike"],
