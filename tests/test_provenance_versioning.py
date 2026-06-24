@@ -238,16 +238,21 @@ class _SearchDB:
     Captures the `limit` it was called with (codex F2 over-fetch lock).
     """
 
-    def __init__(self, results):
+    def __init__(self, results, next_offset=None):
         self._results = results
+        self._next_offset = next_offset
         self.last_limit = None
+        self.last_ssr = "unset"
 
     async def search_memories(self, *a, **k):
         from agent_memory_server.models import MemoryRecordResults
 
         self.last_limit = k.get("limit")
+        self.last_ssr = k.get("server_side_recency")
         return MemoryRecordResults(
-            total=len(self._results), memories=list(self._results), next_offset=None
+            total=len(self._results),
+            memories=list(self._results),
+            next_offset=self._next_offset,
         )
 
     async def list_memories(self, *a, **k):
@@ -445,6 +450,29 @@ async def test_as_of_truncates_overfetched_pool_to_limit():
         res = await ltm.search_long_term_memories(text="valid", limit=2, as_of=_T1)
     assert len(res.memories) == 2
     assert res.total == 2
+
+
+@pytest.mark.asyncio
+async def test_as_of_forces_off_server_side_recency():
+    # codex F1: the SSR aggregation backend omits valid_from/valid_to, so as_of
+    # must NOT use it — the function downgrades server_side_recency to None.
+    db = _SearchDB([_windowed("a", "x", valid_from=_T0)])
+    with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
+        await ltm.search_long_term_memories(
+            text="x", limit=5, as_of=_T1, server_side_recency=True
+        )
+    assert db.last_ssr is None
+
+
+@pytest.mark.asyncio
+async def test_as_of_recall_is_single_page_next_offset_none():
+    # codex F2: the over-fetch + window post-filter breaks the raw next_offset
+    # mapping, so as_of recall nulls next_offset (single-page) rather than skip or
+    # re-scan valid rows across pages.
+    db = _SearchDB([_windowed("a", "x", valid_from=_T0)], next_offset=99)
+    with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
+        res = await ltm.search_long_term_memories(text="x", limit=5, as_of=_T1)
+    assert res.next_offset is None
 
 
 @pytest.mark.asyncio

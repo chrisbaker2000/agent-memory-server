@@ -1794,6 +1794,14 @@ async def search_long_term_memories(
     # per FORK.md #28); valid_from is store-and-return only.
     db_limit = limit if as_of is None else min(max(limit, limit * 5), 200)
 
+    # codex F1: the server-side-recency aggregation backend does not return
+    # valid_from/valid_to, so the as_of window post-filter would see them as None
+    # and pass future/expired records. Force as_of off the SSR path here too
+    # (defense-in-depth — the API route guards this as well). Direct callers are
+    # then safe regardless of how they set server_side_recency.
+    if as_of is not None:
+        server_side_recency = None
+
     # If no query text is provided, perform a filter-only listing (no semantic search).
     # This enables patterns like: "return all memories for this user/namespace".
     if not (text or "").strip():
@@ -1827,6 +1835,12 @@ async def search_long_term_memories(
                 m for m in listing.memories if _within_validity_window(m, as_of_ts)
             ][:limit]
             listing.total = len(listing.memories)
+            # codex F2: as_of recall is single-page. The window post-filter runs on
+            # an over-fetched page, so the raw DB next_offset no longer maps to a
+            # valid-record boundary (it would skip or re-scan rows). Null it so a
+            # caller never paginates into wrong results. Deep pagination under as_of
+            # would need valid_from indexed (a reindex, out of scope).
+            listing.next_offset = None
         await _observe_recall_egress(
             len(listing.memories), exempt=bypass_recall_filters
         )
@@ -1992,6 +2006,10 @@ async def search_long_term_memories(
                 f"[search_long_term_memories] as_of={as_of.isoformat()} "
                 f"excluded/truncated {excluded} record(s) (db_limit={db_limit})"
             )
+        # codex F2: as_of recall is single-page — see the listing-path note above.
+        # The over-fetch + window post-filter breaks the raw next_offset mapping,
+        # so null it rather than skip/re-scan valid rows across pages.
+        results.next_offset = None
     # Supersede-hiding (versioning; ported from wfr-memory-commons). By default,
     # records that have been replaced by a newer version (superseded_by set) are
     # hidden from recall. Done as a post-filter — NOT a Redis query predicate —
