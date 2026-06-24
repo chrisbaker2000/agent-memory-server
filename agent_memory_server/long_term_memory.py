@@ -2002,25 +2002,28 @@ async def search_long_term_memories(
     # records lacking valid_from/valid_to degrade gracefully:
     #   - valid_from None  → no lower bound (always-started)
     #   - valid_to   None  → open-ended, always currently-valid (no upper bound)
-    if as_of is not None and results.memories:
-        as_of_ts = _as_of_timestamp(as_of)
-        before = len(results.memories)
-        # Window-filter the over-fetched candidate pool (db_limit), then truncate
-        # back to the caller's `limit` (codex F2).
-        results.memories = [
-            m for m in results.memories if _within_validity_window(m, as_of_ts)
-        ][:limit]
-        excluded = before - len(results.memories)
-        if excluded:
-            results.total = len(results.memories)
-            logger.debug(
-                f"[search_long_term_memories] as_of={as_of.isoformat()} "
-                f"excluded/truncated {excluded} record(s) (db_limit={db_limit})"
-            )
-        # codex F2: as_of recall is single-page — see the listing-path note above.
-        # The over-fetch + window post-filter breaks the raw next_offset mapping,
-        # so null it rather than skip/re-scan valid rows across pages.
+    if as_of is not None:
+        # codex F2/follow-up: as_of recall is ALWAYS single-page. Null next_offset
+        # unconditionally — the over-fetch + window post-filter breaks the raw
+        # next_offset mapping, and an earlier filter (relevance gate) may already
+        # have emptied results.memories, so this must run even on an empty page
+        # rather than leak a stale DB cursor.
         results.next_offset = None
+        if results.memories:
+            as_of_ts = _as_of_timestamp(as_of)
+            before = len(results.memories)
+            # Window-filter the over-fetched candidate pool (db_limit), then
+            # truncate back to the caller's `limit`.
+            results.memories = [
+                m for m in results.memories if _within_validity_window(m, as_of_ts)
+            ][:limit]
+            excluded = before - len(results.memories)
+            if excluded:
+                results.total = len(results.memories)
+                logger.debug(
+                    f"[search_long_term_memories] as_of={as_of.isoformat()} "
+                    f"excluded/truncated {excluded} record(s) (db_limit={db_limit})"
+                )
     # Supersede-hiding (versioning; ported from wfr-memory-commons). By default,
     # records that have been replaced by a newer version (superseded_by set) are
     # hidden from recall. Done as a post-filter — NOT a Redis query predicate —

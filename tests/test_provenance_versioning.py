@@ -496,6 +496,17 @@ async def test_as_of_recall_is_single_page_next_offset_none():
 
 
 @pytest.mark.asyncio
+async def test_as_of_empty_page_still_nulls_next_offset():
+    # codex follow-up: if an earlier filter empties the page before the as_of block,
+    # next_offset must still be nulled (never leak a stale DB cursor under as_of).
+    db = _SearchDB([], next_offset=42)
+    with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
+        res = await ltm.search_long_term_memories(text="x", limit=5, as_of=_T1)
+    assert res.memories == []
+    assert res.next_offset is None
+
+
+@pytest.mark.asyncio
 async def test_no_as_of_recall_unchanged_still_hides_superseded():
     # Default (no as_of): byte-for-byte unchanged — superseded-hide still applies.
     db = _SearchDB(
