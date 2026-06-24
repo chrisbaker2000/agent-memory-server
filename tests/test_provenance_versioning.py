@@ -423,6 +423,10 @@ def test_coerce_extracted_kind():
     # Unhashable LLM output must NOT raise (a bare `in frozenset` would TypeError).
     assert coerce_extracted_kind(["fact"]) is None
     assert coerce_extracted_kind({"kind": "fact"}) is None
+    # Capitalized/padded LLM emissions normalize to the canonical lowercase value.
+    assert coerce_extracted_kind("Opinion") == "opinion"
+    assert coerce_extracted_kind("FACT ") == "fact"
+    assert coerce_extracted_kind("  Belief  ") == "belief"
 
 
 def test_extraction_confidence_default_is_scored():

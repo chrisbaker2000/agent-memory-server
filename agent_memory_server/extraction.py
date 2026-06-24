@@ -41,9 +41,14 @@ def coerce_extracted_kind(value: object) -> str | None:
     raise on MemoryRecord construction (the Literal would reject it) nor silently
     mislabel. The ``isinstance(value, str)`` guard is load-bearing: a bare
     ``value in VALID_MEMORY_KINDS`` raises TypeError if the LLM emits an unhashable
-    ``kind`` (e.g. a list/dict like ``["fact"]``).
+    ``kind`` (e.g. a list/dict like ``["fact"]``). The value is normalized
+    (strip + lowercase) first, so a capitalized/padded emission like ``"Opinion"``
+    or ``"FACT "`` maps to its canonical form rather than being dropped to None.
     """
-    return value if isinstance(value, str) and value in VALID_MEMORY_KINDS else None
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    return normalized if normalized in VALID_MEMORY_KINDS else None
 
 
 # ============================================================================
