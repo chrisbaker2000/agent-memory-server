@@ -12,12 +12,12 @@ from tenacity.stop import stop_after_attempt
 from agent_memory_server.config import settings
 from agent_memory_server.llm import LLMClient
 from agent_memory_server.logging import get_logger
-from agent_memory_server.telemetry import record_counter
 from agent_memory_server.prompt_security import (
     PromptSecurityError,
     secure_format_prompt,
     validate_custom_prompt,
 )
+from agent_memory_server.telemetry import record_counter
 
 
 logger = get_logger(__name__)
@@ -96,6 +96,46 @@ def _load_family_context() -> str:
         )
     _FAMILY_CONTEXT_CACHE = "\n".join(lines)
     return _FAMILY_CONTEXT_CACHE
+
+
+# Canonical subject-attribution rule — the SINGLE SOURCE OF TRUTH shared by every
+# extraction strategy (LAB-396). The discrete/summary/preferences prompts embed an
+# equivalent rule inline (locked by tests/test_subject_attribution.py), but the
+# CustomMemoryStrategy used by the live OpenClaw config path had NO roster and NO
+# rule, so a custom prompt could silently regress to speaker-centric attribution.
+# This block is prepended (fully resolved — no template placeholders) so it bypasses
+# the custom-prompt secure formatter's variable whitelist while still grounding the
+# extractor on the household roster and the speaker≠subject distinction.
+_SUBJECT_ATTRIBUTION_RULE = (
+    "SUBJECT ATTRIBUTION (CRITICAL): The speaker is NOT automatically the SUBJECT "
+    "of a fact. When the text states something about another named person or "
+    'relative (e.g. "my son Christian…", "my wife…", "Lindalee won…"), the SUBJECT '
+    'of the extracted memory MUST be that person — resolve "my son/daughter/wife/'
+    'husband" to their name using KNOWN PEOPLE listed above. Make the speaker the '
+    "subject ONLY when the fact is genuinely about the speaker themselves. NEVER "
+    "copy the speaker's name onto a fact that is about someone else: do not turn "
+    '"my son is a lightweight rower" into a fact about the speaker — it must become '
+    '"Christian Baker is a lightweight rower".'
+)
+
+
+def _subject_attribution_preamble(user_name: str, family_context: str) -> str:
+    """Build the fully-resolved subject-attribution grounding block.
+
+    Returns a self-contained string (no ``{...}`` template placeholders) so callers
+    can prepend it to an already-formatted prompt without re-running a formatter.
+    ``family_context`` should already be resolved (e.g. via ``_load_family_context()``
+    with a ``"(no roster available)"`` fallback).
+    """
+    return (
+        "CONTEXTUAL GROUNDING — SUBJECT ATTRIBUTION (apply before extracting):\n"
+        f"The application user (the SPEAKER) is: {user_name}\n\n"
+        "KNOWN PEOPLE — the speaker often states facts ABOUT other people (their "
+        "spouse, children, relatives). Attribute each fact to the person it is "
+        "ABOUT, who is frequently NOT the speaker:\n"
+        f"{family_context}\n\n"
+        f"{_SUBJECT_ATTRIBUTION_RULE}\n"
+    )
 
 
 class BaseMemoryStrategy(ABC):
@@ -563,11 +603,22 @@ class CustomMemoryStrategy(BaseMemoryStrategy):
             logger.error(f"Template formatting security error: {e}")
             raise ValueError(f"Prompt formatting failed security check: {e}") from e
 
+        # LAB-396: prepend the shared subject-attribution preamble (roster + rule)
+        # so the live custom-strategy path attributes third-party facts to the
+        # person they are ABOUT instead of the speaker. Resolved AFTER the secure
+        # formatter so the roster bypasses the allowed-vars whitelist; it is trusted
+        # internal text, not user input. _load_family_context() fails loud (WARN +
+        # memory_server.family_roster.unavailable counter) on a missing/empty roster.
+        preamble = _subject_attribution_preamble(
+            user_name, _load_family_context() or "(no roster available)"
+        )
+        final_prompt = f"{preamble}\n\n{formatted_prompt}"
+
         async for attempt in AsyncRetrying(stop=stop_after_attempt(3)):
             with attempt:
                 response = await LLMClient.create_chat_completion(
                     model=settings.generation_model,
-                    messages=[{"role": "user", "content": formatted_prompt}],
+                    messages=[{"role": "user", "content": final_prompt}],
                     response_format={"type": "json_object"},
                 )
                 try:
