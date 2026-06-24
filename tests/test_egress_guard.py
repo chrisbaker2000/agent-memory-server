@@ -236,3 +236,61 @@ async def test_observe_recall_egress_disabled_skips_redis():
     ):
         await ltm._observe_recall_egress(9999)
     conn.assert_not_called()
+
+
+# --- exempt: trusted internal full-corpus caller bypasses the window (LAB-388)
+
+
+@pytest.mark.asyncio
+async def test_observe_recall_egress_exempt_caller_does_not_trip_guard():
+    """A trusted internal full-corpus enumeration (curator backup,
+    bypass_recall_filters=True → exempt=True) must NOT touch the shared window:
+    no config read, no Redis round-trip, no flag/telemetry — even for a record
+    count that would massively exceed the cap. This is the LAB-388 fix: the
+    nightly backup drains ~10k+ records and was poisoning the global counter."""
+    with (
+        patch.object(ltm, "egress_config_from_settings") as cfg,
+        patch.object(ltm, "get_redis_conn", AsyncMock()) as conn,
+        patch.object(ltm, "egress_record_and_check", AsyncMock()) as check,
+        patch.object(ltm, "record_counter") as counter,
+    ):
+        await ltm._observe_recall_egress(10_396, exempt=True)
+    # Short-circuits before any work — the trusted caller never enters the window.
+    cfg.assert_not_called()
+    conn.assert_not_called()
+    check.assert_not_called()
+    counter.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_observe_recall_egress_nonexempt_burst_still_flags():
+    """The exemption is keyed strictly on the trusted-caller flag, so the
+    real-exfil detection floor is unchanged: a NON-exempt caller (a regular
+    recall, or a compromised plugin offset-walking the corpus WITHOUT the
+    bypass flag) whose burst exceeds the cap STILL flags. Asserts the default
+    exempt=False path is unaffected by the new parameter."""
+    with (
+        patch.object(
+            ltm, "egress_config_from_settings", return_value=_cfg(max_records=2000)
+        ),
+        patch.object(
+            ltm, "get_redis_conn", AsyncMock(return_value=_fake_redis(10_396))
+        ),
+        patch.object(
+            ltm,
+            "egress_record_and_check",
+            AsyncMock(
+                return_value=EgressVerdict(
+                    outcome="flagged",
+                    window_total=10_396,
+                    this_request=10_396,
+                    reason="over",
+                )
+            ),
+        ),
+        patch.object(ltm, "record_counter") as counter,
+    ):
+        # exempt defaults to False — the non-exempt drain still trips the guard.
+        await ltm._observe_recall_egress(10_396)
+    counter.assert_called_once()
+    assert counter.call_args.args[0] == "memory_server.egress_guard.flagged"

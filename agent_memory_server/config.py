@@ -353,11 +353,13 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = None
     openai_api_base: str | None = None
     anthropic_api_base: str | None = None
-    # Migrated from Azure to direct Anthropic on 2026-04-20. Homelab deployment
-    # sets these via run-local.sh; the fallback here is Claude Haiku 4.5 (cheap,
-    # fast) via direct Anthropic API so memory operations still work if env vars
+    # Homelab deployment sets these via run-local.sh; the fallback here matches
+    # the deployed GENERATION_MODEL (openai/gpt-4o-mini — cheap, fast, ~20x
+    # cheaper than Haiku) so the fork default never silently drifts onto a
+    # retired model (it referenced gpt-5* historically; aligned to the live
+    # deployed value, LAB-379) and memory operations still work if the env vars
     # fail to export.
-    generation_model: str = "anthropic/claude-haiku-4-5-20251001"
+    generation_model: str = "openai/gpt-4o-mini"
     embedding_model: str = "text-embedding-3-small"
 
     # Cloud
@@ -369,10 +371,12 @@ class Settings(BaseSettings):
     aws_secret_access_key: str | None = None
     aws_session_token: str | None = None
 
-    # Model selection for query optimization — direct Anthropic (migrated from
-    # Azure 2026-04-20). Sonnet for slow/complex, Haiku for fast/simple.
+    # Model selection for query optimization. fast_model matches the deployed
+    # FAST_MODEL (openai/gpt-4o-mini, LAB-379 — was gpt-5-mini historically);
+    # slow_model is the heavier complex-query model (deployed SLOW_MODEL is
+    # Claude Haiku 4.5 via run-local.sh — the env var overrides this default).
     slow_model: str = "anthropic/claude-sonnet-4-6"
-    fast_model: str = "anthropic/claude-haiku-4-5-20251001"
+    fast_model: str = "openai/gpt-4o-mini"
 
     # Model used for merging similar/duplicate memories during compaction.
     # Defaults to None, which resolves to generation_model at runtime.

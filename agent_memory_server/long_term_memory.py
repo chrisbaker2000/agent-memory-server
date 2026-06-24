@@ -1598,14 +1598,29 @@ async def index_long_term_memories(
         )
 
 
-async def _observe_recall_egress(record_count: int) -> None:
+async def _observe_recall_egress(record_count: int, *, exempt: bool = False) -> None:
     """Feed a recall's returned-record count into the global egress volume guard
     (C5; see utils/egress_guard.py) and, on a flagged window, log + emit
     telemetry. DETECT-ONLY — never blocks recall; fail-open on any Redis error
     (record_and_check swallows RedisError, and this wrapper swallows anything
     else so the guard can never break the recall hot path). Called at every
     recall return site (the filter-only listing AND the semantic-search path),
-    since the bulk-drain vector applies to both."""
+    since the bulk-drain vector applies to both.
+
+    ``exempt`` — when True, the call is a no-op (no counter increment, no
+    classify). This is how trusted INTERNAL full-corpus enumeration is kept out
+    of the shared window. The signal is the existing ``bypass_recall_filters``
+    flag (LAB-281), set only by the curator's nightly full-corpus backup, which
+    legitimately paginates the entire corpus (~10k+ rows/run) through the search
+    API in a 60s burst (LAB-388). Without this exemption that one trusted caller
+    poisoned the global counter to ~5x the soft cap every night, sustaining a
+    false ``flagged`` state that would drown a real bulk-exfil signal. The
+    exemption is deliberately keyed on the trusted-caller flag (approach (a)) —
+    NOT a blanket cap raise — so the real-exfil detection floor (a non-exempt
+    caller offset-walking the corpus WITHOUT the flag) is unchanged: such a
+    caller still increments the shared window and still flags above the cap."""
+    if exempt:
+        return
     try:
         config = egress_config_from_settings()
         if not config.enabled or record_count <= 0:
@@ -1708,7 +1723,9 @@ async def search_long_term_memories(
             limit=limit,
             offset=offset,
         )
-        await _observe_recall_egress(len(listing.memories))
+        await _observe_recall_egress(
+            len(listing.memories), exempt=bypass_recall_filters
+        )
         return listing
 
     # Search-query length clamp. A pathologically long recall query (a whole
@@ -1875,7 +1892,9 @@ async def search_long_term_memories(
 
     # Egress volume guard (C5) — count records actually returned (post relevance
     # gate + supersede hiding) into the global fixed-window counter. Detect-only.
-    await _observe_recall_egress(len(results.memories))
+    # bypass_recall_filters marks a trusted internal full-corpus enumeration
+    # (curator backup, LAB-281) and exempts it from the shared window (LAB-388).
+    await _observe_recall_egress(len(results.memories), exempt=bypass_recall_filters)
 
     return results
 
