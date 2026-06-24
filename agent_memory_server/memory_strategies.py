@@ -253,9 +253,11 @@ class DiscreteMemoryStrategy(BaseMemoryStrategy):
           e.g. "Christian thinks rowing is boring"
         * "belief" -- a named person's contestable conviction about how the world is.
           e.g. "Chris believes the QNAP is unreliable"
-      Prefer "fact" for verifiable statements even about other people. Use "opinion"/"belief"
-      only when the text carries an evaluative/conviction verb (thinks/feels/believes/suspects)
-      tied to a holder. "preference" outranks "opinion" for the holder's own taste.
+      Use "event" for a verifiable occurrence anchored to a specific time/date; reserve
+      "fact" for verifiable statements with NO time anchor (a standing/timeless truth) —
+      prefer it even about other people. Use "opinion"/"belief" only when the text carries
+      an evaluative/conviction verb (thinks/feels/believes/suspects) tied to a holder.
+      "preference" outranks "opinion" for the holder's own taste.
     - text: str -- The actual information to store (with all contextual references grounded)
     - topics: list[str] -- The topics of the memory (top {top_k_topics})
     - entities: list[str] -- The entities of the memory
