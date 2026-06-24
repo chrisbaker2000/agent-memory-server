@@ -1840,17 +1840,17 @@ async def search_long_term_memories(
         # applied here too — otherwise a metadata-only "list all" recall with
         # as_of would leak future/expired records. Over-fetched db_limit is
         # window-filtered then truncated back to `limit`.
-        if as_of is not None and listing.memories:
-            as_of_ts = _as_of_timestamp(as_of)
-            listing.memories = [
-                m for m in listing.memories if _within_validity_window(m, as_of_ts)
-            ][:limit]
+        if as_of is not None:
+            # codex F2 + total-consistency follow-up: as_of recall is ALWAYS
+            # single-page. Null next_offset and recompute total UNCONDITIONALLY
+            # (even on an empty/all-valid offset page) — the raw DB total/cursor
+            # reflect the over-fetched pre-filter page, not the windowed result.
+            if listing.memories:
+                as_of_ts = _as_of_timestamp(as_of)
+                listing.memories = [
+                    m for m in listing.memories if _within_validity_window(m, as_of_ts)
+                ][:limit]
             listing.total = len(listing.memories)
-            # codex F2: as_of recall is single-page. The window post-filter runs on
-            # an over-fetched page, so the raw DB next_offset no longer maps to a
-            # valid-record boundary (it would skip or re-scan rows). Null it so a
-            # caller never paginates into wrong results. Deep pagination under as_of
-            # would need valid_from indexed (a reindex, out of scope).
             listing.next_offset = None
         await _observe_recall_egress(
             len(listing.memories), exempt=bypass_recall_filters
@@ -2019,11 +2019,15 @@ async def search_long_term_memories(
             ][:limit]
             excluded = before - len(results.memories)
             if excluded:
-                results.total = len(results.memories)
                 logger.debug(
                     f"[search_long_term_memories] as_of={as_of.isoformat()} "
                     f"excluded/truncated {excluded} record(s) (db_limit={db_limit})"
                 )
+        # total-consistency follow-up: recompute total UNCONDITIONALLY (not only
+        # when records were excluded) — the raw DB total reflects the over-fetched
+        # pre-filter page, so an all-valid or empty offset page would otherwise
+        # leave a stale/inflated total while next_offset is already nulled.
+        results.total = len(results.memories)
     # Supersede-hiding (versioning; ported from wfr-memory-commons). By default,
     # records that have been replaced by a newer version (superseded_by set) are
     # hidden from recall. Done as a post-filter — NOT a Redis query predicate —

@@ -238,9 +238,13 @@ class _SearchDB:
     Captures the `limit` it was called with (codex F2 over-fetch lock).
     """
 
-    def __init__(self, results, next_offset=None):
+    def __init__(self, results, next_offset=None, raw_total=None):
         self._results = results
         self._next_offset = next_offset
+        # raw_total simulates a backend total LARGER than the returned page (the
+        # pre-filter over-fetched count) so a test can prove the as_of post-filter
+        # recomputes total. Defaults to len(results).
+        self._raw_total = raw_total if raw_total is not None else len(results)
         self.last_limit = None
         self.last_ssr = "unset"
 
@@ -250,7 +254,7 @@ class _SearchDB:
         self.last_limit = k.get("limit")
         self.last_ssr = k.get("server_side_recency")
         return MemoryRecordResults(
-            total=len(self._results),
+            total=self._raw_total,
             memories=list(self._results),
             next_offset=self._next_offset,
         )
@@ -262,7 +266,7 @@ class _SearchDB:
         # exercisable — used by the as_of filter-only test (codex F2).
         self.last_limit = k.get("limit")
         return MemoryRecordResults(
-            total=len(self._results), memories=list(self._results), next_offset=None
+            total=self._raw_total, memories=list(self._results), next_offset=None
         )
 
 
@@ -493,6 +497,22 @@ async def test_as_of_recall_is_single_page_next_offset_none():
     with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
         res = await ltm.search_long_term_memories(text="x", limit=5, as_of=_T1)
     assert res.next_offset is None
+
+
+@pytest.mark.asyncio
+async def test_as_of_total_matches_window_result_all_valid():
+    # codex F1 follow-up: when the window filter drops nothing, total must still
+    # equal the returned (windowed/truncated) count — not the raw over-fetched
+    # DB total. Mock returns total=99 but only the page is windowed.
+    # raw_total=99 simulates an inflated backend total; the window drops nothing,
+    # so total must be recomputed to the returned count (2), not left at 99.
+    db = _SearchDB(
+        [_windowed("a", "x", valid_from=_T0), _windowed("b", "y", valid_from=_T0)],
+        raw_total=99,
+    )
+    with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
+        res = await ltm.search_long_term_memories(text="x", limit=5, as_of=_T1)
+    assert res.total == len(res.memories) == 2
 
 
 @pytest.mark.asyncio
