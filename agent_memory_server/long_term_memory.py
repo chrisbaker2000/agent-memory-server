@@ -1209,10 +1209,16 @@ _NOISE_HEARTBEAT = re.compile(
 
 # Daily biometric log dumps (LAB-406): dated WHOOP recovery/HRV/RHR/strain
 # readings (the ~218 "Lindsey's WHOOP 2026-03-20 — Recovery 52%" daily logs).
-# Anchored on WHOOP + a numeric metric reading so durable health facts that
-# happen to mention heart rate / training zones (no WHOOP) are NOT caught.
+# Requires a DAILY-LOG MARKER (date / daily / logged / reading / today) in
+# addition to WHOOP + a numeric metric reading, so a durable WHOOP THRESHOLD or
+# PREFERENCE ("treats WHOOP recovery under 40% as a rest-day signal") is NOT
+# dropped at the write funnel (codex F1) — only actual daily dumps match.
+# Durable health facts that merely mention heart rate / training zones (no WHOOP)
+# were never caught (WHOOP is required).
 _NOISE_DAILY_BIOMETRIC = re.compile(
-    r"\bWHOOP\b[^.]{0,60}?"
+    r"\bWHOOP\b"
+    r"(?=[^.]{0,80}\b(?:\d{4}-\d{2}-\d{2}|daily|logged|reading|today)\b)"
+    r"[^.]{0,80}?"
     r"\b(?:recovery|strain|hrv|rhr|resting heart rate|sleep performance)\b"
     r"[^.]{0,20}?\d",
     re.IGNORECASE,

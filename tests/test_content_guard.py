@@ -340,6 +340,13 @@ class TestDailyBiometricNoise:
             "Lindsey wears a WHOOP band to track her marathon training."
         )
 
+    def test_whoop_metric_threshold_preference_not_noise(self):
+        """A durable WHOOP threshold/preference (WHOOP + metric + number but NO
+        daily-log marker) must NOT be caught — only actual daily dumps (codex F1)."""
+        assert not _is_noise_content(
+            "Lindsey treats WHOOP recovery under 40% as a signal to take a rest day."
+        )
+
 
 class TestMetaReverseOrderNoise:
     """Verify reverse-word-order meta-memories (LAB-406) are caught."""
