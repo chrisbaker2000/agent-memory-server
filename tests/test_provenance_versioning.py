@@ -560,7 +560,11 @@ async def test_strategy_aware_extraction_stamps_kind_and_confidence():
         extraction_strategy_config={},
         discrete_memory_extracted="f",
     )
-    strategy = _Strategy([{"text": "a concise summary", "type": "semantic"}])
+    # The LLM emits a CONFLICTING kind="fact"; the invariant summary default must
+    # OVERRIDE it (a summary is always a summary), not merely fill when absent.
+    strategy = _Strategy(
+        [{"text": "a concise summary", "type": "semantic", "kind": "fact"}]
+    )
 
     with (
         patch(

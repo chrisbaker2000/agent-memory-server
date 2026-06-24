@@ -1069,15 +1069,16 @@ async def extract_memories_with_strategy(
                 id=str(ulid.ULID()),
                 text=new_memory["text"],
                 memory_type=new_memory.get("type", "episodic"),
-                # F0 (LAB-395/LAB-397): epistemic kind from the extractor (coerced
-                # to the valid set; off-vocab/missing → None), falling back to the
-                # strategy's invariant kind (summary→summary, preferences→preference)
-                # so those don't depend on LLM prompt compliance; discrete has no
-                # default, so a missing kind stays None = read as 'fact'. Confidence
-                # is the model-paraphrase tier (distinct from an unscored first-hand
+                # F0 (LAB-395/LAB-397): a strategy with an INVARIANT kind
+                # (summary→summary, preferences→preference) is AUTHORITATIVE — it
+                # overrides whatever the LLM emitted (a summary is always a summary,
+                # even if the model labels it "fact"). Discrete has no invariant
+                # (default None), so it falls through to the coerced LLM kind;
+                # off-vocab/missing → None = read as 'fact'. Confidence is the
+                # model-paraphrase tier (distinct from an unscored first-hand
                 # memory_store write).
-                kind=coerce_extracted_kind(new_memory.get("kind"))
-                or default_kind_for_strategy(new_memory.get("_strategy")),
+                kind=default_kind_for_strategy(new_memory.get("_strategy"))
+                or coerce_extracted_kind(new_memory.get("kind")),
                 confidence=settings.extraction_confidence,
                 topics=enforce_topics(new_memory.get("topics", [])),
                 entities=clean_entities(new_memory.get("entities", [])),
