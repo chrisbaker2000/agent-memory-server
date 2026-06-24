@@ -1192,7 +1192,14 @@ _NOISE_TEST_ARTIFACT = re.compile(
 # Heartbeat / liveness check spam (LAB-406): "Pat reported HEARTBEAT_OK after a
 # heartbeat check." — operational liveness pings, never durable knowledge.
 _NOISE_HEARTBEAT = re.compile(
-    r"\bHEARTBEAT_OK\b|" r"\bheartbeat[ _]?check\b|" r"reported\s+(?:a\s+)?heartbeat",
+    r"\bHEARTBEAT_OK\b|"
+    r"\bheartbeat[ _-]?check\b|"
+    # "reported a heartbeat" only counts as noise when an OPERATIONAL actor
+    # precedes it — never a bare medical phrase. "The cardiologist reported a
+    # heartbeat during the ultrasound" is a durable health fact, NOT noise
+    # (codex F1: over-filtering family/health facts is corruption in this fork).
+    r"\b(?:gateway|service|server|monitor|agent|fleet|bot|cron|daemon|pat)\b.{0,40}"
+    r"\breported\s+(?:a\s+)?heartbeat\b",
     re.IGNORECASE,
 )
 
@@ -1256,6 +1263,20 @@ def _is_noise_content(text: str) -> bool:
         or _NOISE_HEARTBEAT.search(text)
         or _NOISE_DAILY_BIOMETRIC.search(text)
     )
+
+
+def _within_validity_window(m: MemoryRecordResult, as_of_ts: float) -> bool:
+    """LAB-405: True if record `m`'s validity window contains the instant `as_of_ts`.
+
+    `valid_from <= as_of < valid_to` (end-exclusive). Graceful on legacy records:
+    `valid_from` None → no lower bound (always-started); `valid_to` None (open) →
+    always currently-valid (no upper bound). Pure + side-effect-free.
+    """
+    if m.valid_from is not None and as_of_ts < m.valid_from.timestamp():
+        return False  # not yet valid at as_of
+    if m.valid_to is not None and as_of_ts >= m.valid_to.timestamp():
+        return False  # validity ended at/before as_of
+    return True
 
 
 # Source user normalization — maps slugified names back to full names.
@@ -1782,6 +1803,18 @@ async def search_long_term_memories(
             limit=limit,
             offset=offset,
         )
+        # LAB-405 (codex F2): the filter-only listing path returns BEFORE the
+        # vector-path as_of post-filter below, so time-travel recall must be
+        # applied here too — otherwise a metadata-only "list all" recall with
+        # as_of would leak future/expired records.
+        if as_of is not None and listing.memories:
+            as_of_ts = as_of.timestamp()
+            before = len(listing.memories)
+            listing.memories = [
+                m for m in listing.memories if _within_validity_window(m, as_of_ts)
+            ]
+            if len(listing.memories) != before:
+                listing.total = len(listing.memories)
         await _observe_recall_egress(
             len(listing.memories), exempt=bypass_recall_filters
         )
@@ -1934,16 +1967,10 @@ async def search_long_term_memories(
     #   - valid_to   None  → open-ended, always currently-valid (no upper bound)
     if as_of is not None and results.memories:
         as_of_ts = as_of.timestamp()
-
-        def _valid_at(m: MemoryRecordResult) -> bool:
-            if m.valid_from is not None and as_of_ts < m.valid_from.timestamp():
-                return False  # not yet valid at as_of
-            if m.valid_to is not None and as_of_ts >= m.valid_to.timestamp():
-                return False  # validity ended at/before as_of
-            return True
-
         before = len(results.memories)
-        results.memories = [m for m in results.memories if _valid_at(m)]
+        results.memories = [
+            m for m in results.memories if _within_validity_window(m, as_of_ts)
+        ]
         excluded = before - len(results.memories)
         if excluded:
             results.total = len(results.memories)

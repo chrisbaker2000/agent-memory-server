@@ -291,6 +291,13 @@ class TestHeartbeatNoise:
             "after six months of training."
         )
 
+    def test_reported_medical_heartbeat_not_noise(self):
+        """'reported a heartbeat' with no operational actor is a health fact, not
+        noise (codex F1 — over-filtering health facts is corruption in this fork)."""
+        assert not _is_noise_content(
+            "The cardiologist reported a heartbeat during the ultrasound."
+        )
+
 
 class TestDailyBiometricNoise:
     """Verify dated WHOOP daily-log dumps (LAB-406) are caught, while durable

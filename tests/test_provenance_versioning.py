@@ -248,7 +248,11 @@ class _SearchDB:
     async def list_memories(self, *a, **k):
         from agent_memory_server.models import MemoryRecordResults
 
-        return MemoryRecordResults(total=0, memories=[], next_offset=None)
+        # Mirror search_memories so the filter-only (empty-text) recall path is
+        # exercisable — used by the as_of filter-only test (codex F2).
+        return MemoryRecordResults(
+            total=len(self._results), memories=list(self._results), next_offset=None
+        )
 
 
 def _result(id_, text, superseded_by=None):
@@ -326,6 +330,22 @@ async def test_as_of_excludes_not_yet_valid_records():
     )
     with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
         res = await ltm.search_long_term_memories(text="valid", limit=10, as_of=_T1)
+    assert {m.id for m in res.memories} == {"early"}
+    assert res.total == 1
+
+
+@pytest.mark.asyncio
+async def test_as_of_filter_only_listing_applies_window():
+    # codex F2: empty text → filter-only list_memories path, which returns BEFORE
+    # the vector-path post-filter. The as_of window must still be applied there.
+    db = _SearchDB(
+        [
+            _windowed("early", "valid early", valid_from=_T0),
+            _windowed("future", "not valid yet", valid_from=_T2),
+        ]
+    )
+    with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
+        res = await ltm.search_long_term_memories(text="", limit=10, as_of=_T1)
     assert {m.id for m in res.memories} == {"early"}
     assert res.total == 1
 
