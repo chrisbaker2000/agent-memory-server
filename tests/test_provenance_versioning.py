@@ -475,3 +475,54 @@ def test_discrete_prompt_emits_kind():
     # — an example contradicting the event-vs-fact rule would teach the LLM wrong.
     assert '"type": "episodic",\n                "kind": "event"' in p
     assert '"type": "episodic",\n                "kind": "fact"' not in p
+
+
+@pytest.mark.asyncio
+async def test_session_thread_extraction_stamps_kind_and_confidence():
+    """The LIVE auto-capture path (extract_memories_from_session_thread, which
+    hard-codes the discrete strategy) must stamp kind=coerce_extracted_kind(...)
+    and confidence=settings.extraction_confidence onto each constructed record."""
+    from types import SimpleNamespace
+
+    wm = SimpleNamespace(
+        messages=[
+            SimpleNamespace(role="user", content="Christian thinks rowing is boring")
+        ]
+    )
+
+    class _Strategy:
+        async def extract_memories(self, text, source_user_name=None):
+            return [
+                {
+                    "text": "Christian thinks rowing is boring",
+                    "type": "semantic",
+                    "kind": "opinion",
+                },
+                {
+                    "text": "Christian Baker is a lightweight rower",
+                    "type": "semantic",
+                },  # no kind
+                {"text": "bad kind ignored", "type": "semantic", "kind": "BOGUS"},
+            ]
+
+    with (
+        patch(
+            "agent_memory_server.working_memory.get_working_memory",
+            AsyncMock(return_value=wm),
+        ),
+        patch(
+            "agent_memory_server.memory_strategies.get_memory_strategy",
+            return_value=_Strategy(),
+        ),
+    ):
+        records = await ltm.extract_memories_from_session_thread(
+            session_id="test-session", source_user="chris"
+        )
+
+    assert len(records) == 3
+    # Every extracted record is stamped with the scored extraction-confidence tier.
+    assert all(r.confidence == settings.extraction_confidence for r in records)
+    # kind: emitted opinion kept; missing → None (reads as fact); off-vocab → None.
+    assert records[0].kind == "opinion"
+    assert records[1].kind is None
+    assert records[2].kind is None
