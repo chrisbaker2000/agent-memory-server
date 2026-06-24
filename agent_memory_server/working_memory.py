@@ -4,6 +4,7 @@ import json
 import logging
 import time
 from datetime import UTC, datetime
+from typing import Any
 
 from redis.asyncio import Redis
 from redisvl.query import FilterQuery
@@ -25,6 +26,23 @@ logger = logging.getLogger(__name__)
 # Redis keys for migration status (shared across workers, persists across restarts)
 MIGRATION_STATUS_KEY = "working_memory:migration:complete"
 MIGRATION_REMAINING_KEY = "working_memory:migration:remaining"
+
+
+def backfill_message_created_at(message_data: Any, default: Any) -> Any:
+    """Return ``message_data`` with ``created_at`` populated when it is missing.
+
+    LAB-391: legacy working-memory records persisted before ``created_at`` became a
+    standard MemoryMessage field lack it. Re-instantiating such a message warns
+    ("created_at will become required") and degrades recency scoring. This backfills a
+    caller-supplied default (the enclosing working-memory record's timestamp) so reads
+    of legacy data are quiet and deterministically ordered. Non-dict inputs and dicts
+    that already carry a ``created_at`` are returned unchanged (no clobbering real data).
+    """
+    if not isinstance(message_data, dict):
+        return message_data
+    if message_data.get("created_at") is not None:
+        return message_data
+    return {**message_data, "created_at": default}
 
 
 async def check_and_set_migration_status(redis_client: Redis | None = None) -> bool:
@@ -408,10 +426,24 @@ async def get_working_memory(
             memory = MemoryRecord(**memory_data)
             memories.append(memory)
 
-        # Convert messages back to MemoryMessage objects
+        # Convert messages back to MemoryMessage objects.
+        # LAB-391: legacy working-memory records persisted before created_at became
+        # standard lack the field. Re-instantiating them on every read trips the
+        # MemoryMessage validator's "created_at will become required" warning (one per
+        # message id) and leaves recency scoring without a timestamp. Backfill a sensible
+        # default from the enclosing working-memory record (its created_at, else
+        # updated_at, else now) so the read is quiet and ordering has a real value. New
+        # writes already carry created_at, so this only affects pre-existing data.
+        message_created_at_default = (
+            working_memory_data.get("created_at")
+            or working_memory_data.get("updated_at")
+            or datetime.now(UTC).isoformat()
+        )
         messages = []
         for message_data in working_memory_data.get("messages", []):
-            message = MemoryMessage(**message_data)
+            message = MemoryMessage(
+                **backfill_message_created_at(message_data, message_created_at_default)
+            )
             messages.append(message)
 
         # Apply recent messages limit if specified (in-memory slice)
