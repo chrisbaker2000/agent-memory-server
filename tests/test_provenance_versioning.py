@@ -464,6 +464,26 @@ async def test_as_of_forces_off_server_side_recency():
     assert db.last_ssr is None
 
 
+def test_as_of_timestamp_treats_naive_as_utc():
+    # codex F1: a timezone-less as_of must be interpreted as UTC, not host-local,
+    # so it matches the UTC-stored validity windows at the boundary.
+    naive = datetime(2026, 3, 1, 12, 0, 0)
+    aware = datetime(2026, 3, 1, 12, 0, 0, tzinfo=UTC)
+    assert ltm._as_of_timestamp(naive) == ltm._as_of_timestamp(aware)
+    assert ltm._as_of_timestamp(aware) == aware.timestamp()
+
+
+@pytest.mark.asyncio
+async def test_as_of_naive_boundary_matches_utc_window():
+    # A naive as_of exactly at a UTC valid_from is included (start-inclusive),
+    # proving naive→UTC normalization (host-local would shift the boundary).
+    db = _SearchDB([_windowed("a", "x", valid_from=_T1)])
+    naive_t1 = datetime(2026, 3, 1, tzinfo=None)  # == _T1 wall clock, no tz
+    with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
+        res = await ltm.search_long_term_memories(text="x", limit=5, as_of=naive_t1)
+    assert {m.id for m in res.memories} == {"a"}
+
+
 @pytest.mark.asyncio
 async def test_as_of_recall_is_single_page_next_offset_none():
     # codex F2: the over-fetch + window post-filter breaks the raw next_offset

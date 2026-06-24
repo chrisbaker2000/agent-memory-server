@@ -1283,6 +1283,17 @@ def _within_validity_window(m: MemoryRecordResult, as_of_ts: float) -> bool:
     return True
 
 
+def _as_of_timestamp(as_of: datetime) -> float:
+    """Epoch seconds for an `as_of` value, treating timezone-naive API datetimes
+    as UTC (codex F1). `SearchRequest` accepts unzoned datetimes; stored validity
+    windows are UTC, so a naive `.timestamp()` (host-local) could include/exclude
+    the wrong record near a valid_from/valid_to boundary. Normalize to UTC first.
+    """
+    if as_of.tzinfo is None:
+        as_of = as_of.replace(tzinfo=UTC)
+    return as_of.astimezone(UTC).timestamp()
+
+
 # Source user normalization — maps slugified names back to full names.
 # The family registry at ~/.openclaw/family.json is the authoritative source.
 # Falls back to title-casing the slug if the registry isn't available.
@@ -1830,7 +1841,7 @@ async def search_long_term_memories(
         # as_of would leak future/expired records. Over-fetched db_limit is
         # window-filtered then truncated back to `limit`.
         if as_of is not None and listing.memories:
-            as_of_ts = as_of.timestamp()
+            as_of_ts = _as_of_timestamp(as_of)
             listing.memories = [
                 m for m in listing.memories if _within_validity_window(m, as_of_ts)
             ][:limit]
@@ -1992,7 +2003,7 @@ async def search_long_term_memories(
     #   - valid_from None  → no lower bound (always-started)
     #   - valid_to   None  → open-ended, always currently-valid (no upper bound)
     if as_of is not None and results.memories:
-        as_of_ts = as_of.timestamp()
+        as_of_ts = _as_of_timestamp(as_of)
         before = len(results.memories)
         # Window-filter the over-fetched candidate pool (db_limit), then truncate
         # back to the caller's `limit` (codex F2).
