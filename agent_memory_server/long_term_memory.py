@@ -1159,7 +1159,7 @@ _NOISE_TWEET_LOG = re.compile(
 )
 
 _NOISE_META_MEMORY = re.compile(
-    r"memory.system.*(?:overhaul|redesign|audit|cleanup|migration|restore)|"
+    r"memory.system.*(?:overhaul|redesign|audit|review|cleanup|reindex|migration|restore)|"
     r"memory.(?:quality|maintenance|compaction|dedup|consolidat).*(?:ran|completed|phase)|"
     r"mega.memory.*(?:split|decompos)|"
     r"(?:disabled|permanently).*dream.cycle|dream.cycle.*(?:disabled|prompt|configured)|"

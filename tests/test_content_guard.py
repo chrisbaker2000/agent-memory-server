@@ -354,3 +354,7 @@ class TestMetaReverseOrderNoise:
         assert _is_noise_content(
             "Pat ran a review of the memory system after the migration."
         )
+
+    def test_forward_memory_system_reindex(self):
+        """Forward order with review/reindex must match too (gateway-half parity)."""
+        assert _is_noise_content("Pat ran a memory system reindex last night.")
