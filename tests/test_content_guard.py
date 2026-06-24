@@ -5,8 +5,6 @@ schemas, and monitoring reports — is rejected at the universal write funnel,
 preventing it from polluting the memory store.
 """
 
-import pytest
-
 from agent_memory_server.long_term_memory import _is_noise_content
 
 
@@ -26,9 +24,7 @@ class TestTweetLogNoise:
         )
 
     def test_pat_tweeted(self):
-        assert _is_noise_content(
-            "@Hi_Its_Pat tweeted about the stealth bear market"
-        )
+        assert _is_noise_content("@Hi_Its_Pat tweeted about the stealth bear market")
 
     def test_posted_original_tweet(self):
         assert _is_noise_content(
@@ -90,8 +86,7 @@ class TestMetaMemoryNoise:
 
     def test_orphan_memories_found(self):
         assert _is_noise_content(
-            "5 orphan memory keys were found and cleaned during "
-            "nightly maintenance."
+            "5 orphan memory keys were found and cleaned during " "nightly maintenance."
         )
 
     def test_memory_hygiene(self):
@@ -178,9 +173,7 @@ class TestMonitoringNoise:
         )
 
     def test_no_raw_scanner(self):
-        assert _is_noise_content(
-            "No raw-scanner PDFs were found or renamed."
-        )
+        assert _is_noise_content("No raw-scanner PDFs were found or renamed.")
 
     def test_file_renamed(self):
         assert _is_noise_content(
@@ -245,4 +238,100 @@ class TestNoiseGuardEdgeCases:
         assert not _is_noise_content(
             "Chris Baker prefers 2-space indentation, single quotes, "
             "and trailing commas in TypeScript."
+        )
+
+
+class TestTestArtifactNoise:
+    """Verify test-harness fixtures (LAB-406) are caught."""
+
+    def test_contract_test_marker(self):
+        assert _is_noise_content(
+            "Contract test unique-marker-abc123: pat observes the moon."
+        )
+
+    def test_contract_test_espresso(self):
+        assert _is_noise_content("Contract test: chris likes espresso.")
+
+    def test_smoke_test(self):
+        assert _is_noise_content(
+            "Smoke test run completed: gateway answered the canary turn."
+        )
+
+    def test_e2e_test_artifact(self):
+        assert _is_noise_content(
+            "E2E test artifact: ephemeral marker stored during section 14."
+        )
+
+    def test_observes_the_moon_fixture(self):
+        assert _is_noise_content("Pat observes the moon during the nightly check.")
+
+    def test_real_espresso_preference_not_noise(self):
+        """A genuine preference (no test marker) must NOT be caught."""
+        assert not _is_noise_content("Chris likes espresso in the morning.")
+
+
+class TestHeartbeatNoise:
+    """Verify heartbeat / liveness-check spam (LAB-406) is caught."""
+
+    def test_heartbeat_ok(self):
+        assert _is_noise_content(
+            "Pat reported HEARTBEAT_OK after a heartbeat check at 14:05."
+        )
+
+    def test_heartbeat_check_phrase(self):
+        assert _is_noise_content("Nightly heartbeat check passed, all green.")
+
+    def test_reported_heartbeat(self):
+        assert _is_noise_content("The gateway reported a heartbeat to the monitor.")
+
+    def test_real_health_fact_not_noise(self):
+        """'heartbeat' as a medical term in a durable fact must NOT be caught."""
+        assert not _is_noise_content(
+            "Scott Baker's resting heart rate has improved to 58 bpm "
+            "after six months of training."
+        )
+
+
+class TestDailyBiometricNoise:
+    """Verify dated WHOOP daily-log dumps (LAB-406) are caught, while durable
+    health facts are preserved (no over-flagging — see misattribution caution)."""
+
+    def test_whoop_recovery_dump(self):
+        assert _is_noise_content(
+            "Health: Lindsey's WHOOP 2026-03-20 — Recovery 52%, HRV 41 ms, "
+            "RHR 60 bpm, Strain 8.4."
+        )
+
+    def test_whoop_strain(self):
+        assert _is_noise_content("WHOOP daily strain 12.3 logged for Chris.")
+
+    def test_whoop_hrv(self):
+        assert _is_noise_content("Lindsey's WHOOP HRV reading was 45 ms today.")
+
+    def test_durable_heart_rate_fact_not_noise(self):
+        """Max heart rate / training zones (no WHOOP) are durable — NOT noise."""
+        assert not _is_noise_content(
+            "Lindsey Baker's max heart rate is 181 bpm (measured). "
+            "Her UT1 training zone is 136-154 bpm."
+        )
+
+    def test_whoop_durable_fact_no_metric_not_noise(self):
+        """Mentioning WHOOP without a daily metric reading is a durable fact."""
+        assert not _is_noise_content(
+            "Lindsey wears a WHOOP band to track her marathon training."
+        )
+
+
+class TestMetaReverseOrderNoise:
+    """Verify reverse-word-order meta-memories (LAB-406) are caught."""
+
+    def test_audit_of_memory_system(self):
+        assert _is_noise_content(
+            "Chris Baker asked for a full audit of the memory system "
+            "to find duplicate records."
+        )
+
+    def test_review_the_memory_system(self):
+        assert _is_noise_content(
+            "Pat ran a review of the memory system after the migration."
         )

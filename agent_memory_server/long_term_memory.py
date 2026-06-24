@@ -1169,7 +1169,41 @@ _NOISE_META_MEMORY = re.compile(
     r"memories.*were.*(?:cleaned|fixed|purged|deleted|restored)|"
     r"decomposition.*(?:task|workflow).*(?:stored|completed)|"
     r"memory.*hygiene|memory.*remediation|"
+    # Reverse word order: "...audit of the memory system" / "review the memory
+    # system" (the forward "memory.system.*audit" alternation above misses these).
+    r"(?:audit|overhaul|redesign|review|cleanup|reindex).{0,30}memory.system|"
     r"stored a backup file named",
+    re.IGNORECASE,
+)
+
+# Test-harness artifacts: contract/smoke/e2e test fixtures that leak into the
+# corpus as if they were durable facts (LAB-406). "observes the moon" /
+# "unique-marker-" are the seeded contract-test fixture markers.
+_NOISE_TEST_ARTIFACT = re.compile(
+    r"\bcontract test\b|"
+    r"\btest artifact\b|"
+    r"\bsmoke test\b|"
+    r"\be2e test\b|"
+    r"\bunique-marker-|"
+    r"\bobserves the moon\b",
+    re.IGNORECASE,
+)
+
+# Heartbeat / liveness check spam (LAB-406): "Pat reported HEARTBEAT_OK after a
+# heartbeat check." — operational liveness pings, never durable knowledge.
+_NOISE_HEARTBEAT = re.compile(
+    r"\bHEARTBEAT_OK\b|" r"\bheartbeat[ _]?check\b|" r"reported\s+(?:a\s+)?heartbeat",
+    re.IGNORECASE,
+)
+
+# Daily biometric log dumps (LAB-406): dated WHOOP recovery/HRV/RHR/strain
+# readings (the ~218 "Lindsey's WHOOP 2026-03-20 — Recovery 52%" daily logs).
+# Anchored on WHOOP + a numeric metric reading so durable health facts that
+# happen to mention heart rate / training zones (no WHOOP) are NOT caught.
+_NOISE_DAILY_BIOMETRIC = re.compile(
+    r"\bWHOOP\b[^.]{0,60}?"
+    r"\b(?:recovery|strain|hrv|rhr|resting heart rate|sleep performance)\b"
+    r"[^.]{0,20}?\d",
     re.IGNORECASE,
 )
 
@@ -1192,7 +1226,11 @@ _NOISE_MONITORING = re.compile(
     r"no raw.scanner|no individual file|"
     r"(?:PDF|document|file) renamed from (?:scan_|document_)|"
     r"all (?:docker |homelab )?services (?:are )?healthy(?!\s*\w)|"
-    r"^backup completed successfully$",
+    # LAB-406: was over-anchored as ^...$, so "Nightly backup completed
+    # successfully: …" (the real shape) slipped through. Match the phrase
+    # anywhere — a "backup completed successfully" line is pure ops noise
+    # regardless of surrounding words.
+    r"backup completed successfully",
     re.IGNORECASE,
 )
 
@@ -1205,12 +1243,18 @@ def _is_noise_content(text: str) -> bool:
     - Meta-memories about the memory system itself
     - Analytics/BigQuery schema dumps
     - Monitoring status reports and file-operation records
+    - Test-harness artifacts (contract/smoke/e2e fixtures) (LAB-406)
+    - Heartbeat / liveness-check spam (LAB-406)
+    - Dated WHOOP daily-biometric log dumps (LAB-406)
     """
     return bool(
         _NOISE_TWEET_LOG.search(text)
         or _NOISE_META_MEMORY.search(text)
         or _NOISE_ANALYTICS_SCHEMA.search(text)
         or _NOISE_MONITORING.search(text)
+        or _NOISE_TEST_ARTIFACT.search(text)
+        or _NOISE_HEARTBEAT.search(text)
+        or _NOISE_DAILY_BIOMETRIC.search(text)
     )
 
 
@@ -1681,6 +1725,7 @@ async def search_long_term_memories(
     kind: Kind | None = None,
     min_confidence: MinConfidence | None = None,
     include_superseded: bool = False,
+    as_of: datetime | None = None,
     server_side_recency: bool | None = None,
     recency_params: dict | None = None,
     limit: int = 10,
@@ -1879,13 +1924,40 @@ async def search_long_term_memories(
             results.memories = [m for i, m in enumerate(results.memories) if i in kept]
             results.total = len(results.memories)
 
+    # Time-travel recall (LAB-405). When `as_of` is set, the validity window is the
+    # authoritative filter: keep records valid at that instant
+    # (`valid_from <= as_of < valid_to`) and SKIP the default superseded-hide below —
+    # a record superseded AFTER as_of was still valid then (its valid_to is later than
+    # as_of) and must appear. Done as a post-filter (NOT a Redis predicate) so legacy
+    # records lacking valid_from/valid_to degrade gracefully:
+    #   - valid_from None  → no lower bound (always-started)
+    #   - valid_to   None  → open-ended, always currently-valid (no upper bound)
+    if as_of is not None and results.memories:
+        as_of_ts = as_of.timestamp()
+
+        def _valid_at(m: MemoryRecordResult) -> bool:
+            if m.valid_from is not None and as_of_ts < m.valid_from.timestamp():
+                return False  # not yet valid at as_of
+            if m.valid_to is not None and as_of_ts >= m.valid_to.timestamp():
+                return False  # validity ended at/before as_of
+            return True
+
+        before = len(results.memories)
+        results.memories = [m for m in results.memories if _valid_at(m)]
+        excluded = before - len(results.memories)
+        if excluded:
+            results.total = len(results.memories)
+            logger.debug(
+                f"[search_long_term_memories] as_of={as_of.isoformat()} "
+                f"excluded {excluded} out-of-window record(s)"
+            )
     # Supersede-hiding (versioning; ported from wfr-memory-commons). By default,
     # records that have been replaced by a newer version (superseded_by set) are
     # hidden from recall. Done as a post-filter — NOT a Redis query predicate —
     # so records written before this field existed (no superseded_by on the hash)
     # are correctly treated as "not superseded" and always kept. include_superseded
-    # surfaces them (e.g. for history/audit views).
-    if not include_superseded and results.memories:
+    # surfaces them (e.g. for history/audit views). Skipped under as_of (above).
+    elif not include_superseded and results.memories:
         before = len(results.memories)
         results.memories = [m for m in results.memories if not m.superseded_by]
         hidden = before - len(results.memories)

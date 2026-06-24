@@ -893,6 +893,19 @@ class SearchRequest(BaseModel):
             "version. Default False hides them from recall."
         ),
     )
+    as_of: datetime | None = Field(
+        default=None,
+        description=(
+            "Time-travel recall (LAB-405): when set, return only records whose "
+            "validity window contains this instant — `valid_from <= as_of < "
+            "valid_to`. Open-ended records (valid_to None) are always "
+            "currently-valid; legacy records without valid_from have no lower "
+            "bound. A record valid at `as_of` but superseded afterwards is "
+            "included (its valid_to is later than as_of), so as_of supersedes "
+            "the default superseded-hiding. Default None = present-time recall, "
+            "byte-for-byte unchanged."
+        ),
+    )
     bypass_recall_filters: bool = Field(
         default=False,
         description=(

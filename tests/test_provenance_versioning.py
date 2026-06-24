@@ -295,6 +295,109 @@ async def test_recall_keeps_records_missing_superseded_field():
     assert {m.id for m in res.memories} == {"legacy"}
 
 
+# --- as_of time-travel recall (LAB-405) ------------------------------------
+
+
+def _windowed(id_, text, valid_from=None, valid_to=None, superseded_by=None):
+    """A search result with an explicit validity window."""
+    base = MemoryRecord(
+        id=id_,
+        text=text,
+        valid_from=valid_from,
+        valid_to=valid_to,
+        superseded_by=superseded_by,
+    )
+    return MemoryRecordResult(**base.model_dump(), dist=0.1)
+
+
+_T0 = datetime(2026, 1, 1, tzinfo=UTC)
+_T1 = datetime(2026, 3, 1, tzinfo=UTC)
+_T2 = datetime(2026, 6, 1, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_as_of_excludes_not_yet_valid_records():
+    # A record whose validity STARTS after as_of must be excluded.
+    db = _SearchDB(
+        [
+            _windowed("early", "valid early", valid_from=_T0),
+            _windowed("future", "not valid yet", valid_from=_T2),
+        ]
+    )
+    with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
+        res = await ltm.search_long_term_memories(text="valid", limit=10, as_of=_T1)
+    assert {m.id for m in res.memories} == {"early"}
+    assert res.total == 1
+
+
+@pytest.mark.asyncio
+async def test_as_of_includes_superseded_record_valid_then():
+    # A record valid at as_of but superseded AFTERWARDS (valid_to after as_of)
+    # must be included — as_of overrides the default superseded-hide.
+    db = _SearchDB(
+        [
+            _windowed("new", "current value", valid_from=_T2),
+            _windowed(
+                "old",
+                "old value",
+                valid_from=_T0,
+                valid_to=_T2,
+                superseded_by="new",
+            ),
+        ]
+    )
+    with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
+        res = await ltm.search_long_term_memories(text="value", limit=10, as_of=_T1)
+    # at _T1: "old" is valid (T0 <= T1 < T2); "new" not yet valid (valid_from T2).
+    assert {m.id for m in res.memories} == {"old"}
+
+
+@pytest.mark.asyncio
+async def test_as_of_excludes_window_ended_at_or_before():
+    # `valid_to <= as_of` (end-exclusive) → excluded.
+    db = _SearchDB(
+        [
+            _windowed("ended", "ended exactly at as_of", valid_from=_T0, valid_to=_T1),
+            _windowed("open", "still valid", valid_from=_T0),
+        ]
+    )
+    with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
+        res = await ltm.search_long_term_memories(text="valid", limit=10, as_of=_T1)
+    assert {m.id for m in res.memories} == {"open"}
+
+
+@pytest.mark.asyncio
+async def test_as_of_open_ended_record_always_currently_valid():
+    # valid_to None (open) → always currently-valid at any as_of >= valid_from.
+    db = _SearchDB([_windowed("open", "open record", valid_from=_T0)])
+    with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
+        res = await ltm.search_long_term_memories(text="open", limit=10, as_of=_T2)
+    assert {m.id for m in res.memories} == {"open"}
+
+
+@pytest.mark.asyncio
+async def test_as_of_legacy_record_no_valid_from_has_no_lower_bound():
+    # Legacy record (valid_from None, valid_to None) → always valid at any as_of.
+    db = _SearchDB([_windowed("legacy", "pre-versioning")])
+    with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
+        res = await ltm.search_long_term_memories(text="legacy", limit=10, as_of=_T0)
+    assert {m.id for m in res.memories} == {"legacy"}
+
+
+@pytest.mark.asyncio
+async def test_no_as_of_recall_unchanged_still_hides_superseded():
+    # Default (no as_of): byte-for-byte unchanged — superseded-hide still applies.
+    db = _SearchDB(
+        [
+            _windowed("a", "current"),
+            _windowed("b", "old", superseded_by="a"),
+        ]
+    )
+    with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
+        res = await ltm.search_long_term_memories(text="x", limit=10)
+    assert {m.id for m in res.memories} == {"a"}
+
+
 # --- supersede_memory state machine ----------------------------------------
 
 

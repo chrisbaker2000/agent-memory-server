@@ -719,7 +719,7 @@ async def create_long_term_memory(
         raise HTTPException(
             status_code=503,
             detail=f"Memory indexing failed (embedding service may be down): {e}",
-        )
+        ) from e
     return StoreMemoryResponse(
         status="ok",
         similar_memories=similar_memories_map,
@@ -757,6 +757,7 @@ async def search_long_term_memory(
         "offset": payload.offset,
         "optimize_query": optimize_query,
         "include_superseded": payload.include_superseded,
+        "as_of": payload.as_of,
         "bypass_recall_filters": payload.bypass_recall_filters,
         **filters,
     }
