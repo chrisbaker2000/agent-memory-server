@@ -1610,15 +1610,23 @@ async def _observe_recall_egress(record_count: int, *, exempt: bool = False) -> 
     ``exempt`` — when True, the call is a no-op (no counter increment, no
     classify). This is how trusted INTERNAL full-corpus enumeration is kept out
     of the shared window. The signal is the existing ``bypass_recall_filters``
-    flag (LAB-281), set only by the curator's nightly full-corpus backup, which
-    legitimately paginates the entire corpus (~10k+ rows/run) through the search
-    API in a 60s burst (LAB-388). Without this exemption that one trusted caller
-    poisoned the global counter to ~5x the soft cap every night, sustaining a
-    false ``flagged`` state that would drown a real bulk-exfil signal. The
-    exemption is deliberately keyed on the trusted-caller flag (approach (a)) —
-    NOT a blanket cap raise — so the real-exfil detection floor (a non-exempt
-    caller offset-walking the corpus WITHOUT the flag) is unchanged: such a
-    caller still increments the shared window and still flags above the cap."""
+    flag (LAB-281). In this single-tenant loopback deployment that flag is set
+    by the curator's nightly full-corpus backup, which legitimately paginates the
+    entire corpus (~10k+ rows/run) through the search API in a 60s burst
+    (LAB-388) — and is trusted to be the only caller that sets it. Without this
+    exemption that one trusted caller poisoned the global counter to ~5x the soft
+    cap every night, sustaining a false ``flagged`` state that would drown a real
+    bulk-exfil signal. The exemption is deliberately keyed on the trusted-caller
+    flag (approach (a)) — NOT a blanket cap raise — so the real-exfil detection
+    floor (a non-exempt caller offset-walking the corpus WITHOUT the flag) is
+    unchanged: such a caller still increments the shared window and still flags
+    above the cap. CAVEAT: ``bypass_recall_filters`` is a wire-settable
+    ``SearchRequest`` field, so the exemption is a deployment convention, not an
+    enforced invariant — a caller that reaches the search endpoint can set it and
+    opt out of the (detect-only) guard. Acceptable while detect-only/fail-open;
+    if the guard is ever flipped to ENFORCING, gate the exemption on a
+    server-trusted signal (internal-call marker / operator token, FORK.md #17)
+    rather than the wire-settable flag."""
     if exempt:
         return
     try:
