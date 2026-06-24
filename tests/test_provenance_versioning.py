@@ -122,6 +122,23 @@ def test_memory_to_data_bounded_valid_to():
     assert data["valid_to"] == vt.timestamp()
 
 
+def test_memory_to_data_naive_bounds_serialized_as_utc():
+    # codex F1 (write-path TZ blocker): a timezone-NAIVE valid_from/valid_to must
+    # be serialized as UTC epoch, NOT shifted by the host-local offset. Compare
+    # against the explicit UTC interpretation of the same wall clock.
+    db = _db()
+    naive = datetime(2026, 3, 1, 12, 0, 0)  # no tzinfo
+    aware_utc = naive.replace(tzinfo=UTC)
+    data = db._memory_to_data(
+        MemoryRecord(
+            id="p4", text="t", valid_from=naive, valid_to=naive, observed_at=naive
+        )
+    )
+    assert data["valid_from"] == aware_utc.timestamp()
+    assert data["valid_to_ts"] == aware_utc.timestamp()
+    assert data["observed_at"] == aware_utc.timestamp()
+
+
 def test_data_to_memory_result_parses_provenance():
     db = _db()
     now_ts = datetime(2026, 6, 18, tzinfo=UTC).timestamp()

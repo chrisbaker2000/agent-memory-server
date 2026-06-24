@@ -402,26 +402,31 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         Returns:
             Dictionary suitable for RedisVL index.load()
         """
-        created_at_val = memory.created_at.timestamp() if memory.created_at else None
-        last_accessed_val = (
-            memory.last_accessed.timestamp() if memory.last_accessed else None
-        )
-        updated_at_val = memory.updated_at.timestamp() if memory.updated_at else None
-        persisted_at_val = (
-            memory.persisted_at.timestamp() if memory.persisted_at else None
-        )
-        event_date_val = memory.event_date.timestamp() if memory.event_date else None
-        stale_after_val = (
-            memory.stale_after.timestamp() if memory.stale_after else None
-        )
+
+        # codex F1 (LAB-405): normalize EVERY temporal field through UTC before
+        # serializing. A bare `.timestamp()` on a timezone-NAIVE datetime uses the
+        # host-local offset, so on this non-UTC host (America/New_York) a
+        # client-supplied naive valid_from/valid_to (or event_date/stale_after)
+        # would be persisted hours off its intended UTC instant — shifting the
+        # boundary the read-side `_within_validity_window` later compares against.
+        # No-op for tz-aware values (`.astimezone(UTC).timestamp() == .timestamp()`).
+        def _utc_ts(value: datetime | None) -> float | None:
+            if value is None:
+                return None
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=UTC)
+            return value.astimezone(UTC).timestamp()
+
+        created_at_val = _utc_ts(memory.created_at)
+        last_accessed_val = _utc_ts(memory.last_accessed)
+        updated_at_val = _utc_ts(memory.updated_at)
+        persisted_at_val = _utc_ts(memory.persisted_at)
+        event_date_val = _utc_ts(memory.event_date)
+        stale_after_val = _utc_ts(memory.stale_after)
         # Provenance & versioning temporal companions.
-        observed_at_val = (
-            memory.observed_at.timestamp() if memory.observed_at else None
-        )
-        valid_from_val = (
-            memory.valid_from.timestamp() if memory.valid_from else None
-        )
-        valid_to_val = memory.valid_to.timestamp() if memory.valid_to else None
+        observed_at_val = _utc_ts(memory.observed_at)
+        valid_from_val = _utc_ts(memory.valid_from)
+        valid_to_val = _utc_ts(memory.valid_to)
 
         pinned_int = 1 if getattr(memory, "pinned", False) else 0
         access_count_int = int(getattr(memory, "access_count", 0) or 0)
@@ -432,9 +437,7 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         extracted_from_str = (
             "|".join(memory.extracted_from) if memory.extracted_from else ""
         )
-        derived_from_str = (
-            "|".join(memory.derived_from) if memory.derived_from else ""
-        )
+        derived_from_str = "|".join(memory.derived_from) if memory.derived_from else ""
 
         memory_type_val = (
             memory.memory_type.value
@@ -903,8 +906,7 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
                 return_fields=self.RETURN_FIELDS,
                 num_results=limit,
             )
-            results = await self._index.query(fq)
-            return results  # List[Dict[str, Any]] in BM25 relevance order
+            return await self._index.query(fq)
         except Exception as e:
             logger.warning(f"Hybrid text search failed, using vector-only: {e}")
             return []
@@ -1111,7 +1113,9 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
             # the cap (hybrid needs the multiplier headroom for good fusion).
             REDIS_SEARCH_LIMIT_CAP = 10000
             if use_hybrid:
-                fetch_count = (limit + offset) * settings.hybrid_search_text_results_multiplier
+                fetch_count = (
+                    limit + offset
+                ) * settings.hybrid_search_text_results_multiplier
                 if fetch_count > REDIS_SEARCH_LIMIT_CAP:
                     # Fall back to non-hybrid: offset is too high for multiplied fetch
                     fetch_count = min(limit + offset, REDIS_SEARCH_LIMIT_CAP)
@@ -1156,7 +1160,8 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
             vector_results: list[MemoryRecordResult] = []
             for fields in results:
                 score = float(
-                    fields.get("vector_distance", fields.get("__vector_score", 0.0)) or 0.0
+                    fields.get("vector_distance", fields.get("__vector_score", 0.0))
+                    or 0.0
                 )
                 memory_result = self._data_to_memory_result(fields, score)
                 if memory_result.id and memory_result.id in seen_vector_ids:
@@ -1197,9 +1202,7 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
                     memory_results, recency_params
                 )
 
-            next_offset = (
-                offset + limit if len(memory_results) == limit else None
-            )
+            next_offset = offset + limit if len(memory_results) == limit else None
         finally:
             _search_timer.__exit__(None, None, None)
         search_type = "hybrid" if use_hybrid else "vector"
