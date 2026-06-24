@@ -431,6 +431,17 @@ def test_extraction_confidence_default_is_scored():
     assert 0.0 < settings.extraction_confidence < 1.0
 
 
+def test_extraction_confidence_bounded_at_config_boundary():
+    # A mis-set env must fail LOUD at config load (the boundary), not deep in
+    # extraction when stamped onto MemoryRecord.confidence (ge=0/le=1).
+    from agent_memory_server.config import Settings
+
+    with pytest.raises(ValueError):
+        Settings(extraction_confidence=1.5)
+    with pytest.raises(ValueError):
+        Settings(extraction_confidence=-0.1)
+
+
 def test_opinion_record_serializes_kind_tag_and_scored_confidence():
     # An extracted opinion (kind=opinion, confidence=0.7) must serialize a real
     # confidence_idx (NOT the unscored sentinel) and the kind TAG — so a

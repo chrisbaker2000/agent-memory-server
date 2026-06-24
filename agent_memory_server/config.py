@@ -5,7 +5,7 @@ from typing import Any, Literal
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -422,7 +422,10 @@ class Settings(BaseSettings):
     # the memory_store tool, which stays UNSCORED (None → the 2.0 sentinel that
     # passes any min_confidence floor). Confidence is an opt-in recall floor only;
     # it is NOT a ranking signal, so this does not change default recall ordering.
-    extraction_confidence: float = 0.7
+    # Bounded [0, 1] so a mis-set env fails LOUD at config load (the boundary)
+    # rather than deep in extraction when stamped onto MemoryRecord.confidence
+    # (which has the same ge/le and would raise mid-pipeline).
+    extraction_confidence: float = Field(default=0.7, ge=0.0, le=1.0)
 
     # Topic modeling
     topic_model_source: Literal["BERT", "LLM"] = "LLM"
