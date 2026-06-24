@@ -1,10 +1,9 @@
 # MEMORY-MODEL.md — Epistemic + Source-Trust Schema Decision (F0 / LAB-395)
 
-> **Status: DRAFT — awaiting Chris's sign-off.** This note ships *no behavioral
-> code change* on its own. Several deep-dive tickets (LAB-397 populate
-> kind/confidence, LAB-403 author-trust tier, LAB-399 supersession) implement
-> against the decisions recorded here. Nothing downstream proceeds until this is
-> approved.
+> **Status: APPROVED — Chris signed off on all 4 recommendations (LAB-395, 2026-06-24).**
+> This note ships *no behavioral code change* on its own. Several deep-dive tickets
+> (LAB-397 populate kind/confidence, LAB-403 author-trust tier, LAB-399 supersession)
+> implement against the decisions recorded here.
 
 This is the single agreed convention for the provenance/versioning fields added
 in FORK.md #16 — specifically the two that are **100% unpopulated** today
