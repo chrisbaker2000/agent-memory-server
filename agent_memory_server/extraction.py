@@ -33,6 +33,17 @@ VALID_MEMORY_KINDS = frozenset(
 )
 
 
+# Strategies whose epistemic `kind` is invariant get it stamped deterministically
+# rather than relying on LLM prompt compliance (the discrete strategy, by contrast,
+# emits a per-memory kind that varies, so it has no default here). LAB-397.
+_STRATEGY_DEFAULT_KIND = {"summary": "summary", "preferences": "preference"}
+
+
+def default_kind_for_strategy(strategy_name: str | None) -> str | None:
+    """Return the invariant `kind` for a strategy whose kind is fixed, else None."""
+    return _STRATEGY_DEFAULT_KIND.get(strategy_name or "")
+
+
 def coerce_extracted_kind(value: object) -> str | None:
     """Coerce an LLM-emitted `kind` to a valid MemoryKind, else None.
 
@@ -1027,6 +1038,7 @@ async def extract_memories_with_strategy(
                     em["_source_user"] = parent_user
                     em["_source_channel"] = parent_channel
                     em["_visibility"] = parent_visibility
+                    em["_strategy"] = strategy_name
 
                 all_new_memories.extend(extracted_memories)
 
@@ -1058,10 +1070,14 @@ async def extract_memories_with_strategy(
                 text=new_memory["text"],
                 memory_type=new_memory.get("type", "episodic"),
                 # F0 (LAB-395/LAB-397): epistemic kind from the extractor (coerced
-                # to the valid set; off-vocab/missing → None = read as 'fact'), and
-                # confidence stamped for the model-paraphrase tier (distinct from a
-                # first-hand memory_store write, which stays unscored).
-                kind=coerce_extracted_kind(new_memory.get("kind")),
+                # to the valid set; off-vocab/missing → None), falling back to the
+                # strategy's invariant kind (summary→summary, preferences→preference)
+                # so those don't depend on LLM prompt compliance; discrete has no
+                # default, so a missing kind stays None = read as 'fact'. Confidence
+                # is the model-paraphrase tier (distinct from an unscored first-hand
+                # memory_store write).
+                kind=coerce_extracted_kind(new_memory.get("kind"))
+                or default_kind_for_strategy(new_memory.get("_strategy")),
                 confidence=settings.extraction_confidence,
                 topics=enforce_topics(new_memory.get("topics", [])),
                 entities=clean_entities(new_memory.get("entities", [])),

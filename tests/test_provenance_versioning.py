@@ -526,3 +526,69 @@ async def test_session_thread_extraction_stamps_kind_and_confidence():
     assert records[0].kind == "opinion"
     assert records[1].kind is None
     assert records[2].kind is None
+
+
+@pytest.mark.asyncio
+async def test_strategy_aware_extraction_stamps_kind_and_confidence():
+    """extract_memories_with_strategy must stamp confidence + a kind on each
+    record: the LLM-emitted kind when present (discrete), else the strategy's
+    invariant default (summary→summary, preferences→preference)."""
+    import agent_memory_server.extraction as ext
+
+    captured: list = []
+
+    async def _capture_index(memories, **kwargs):
+        captured.extend(memories)
+
+    class _Strategy:
+        def __init__(self, out):
+            self._out = out
+
+        async def extract_memories(self, text, source_user_name=None):
+            return self._out
+
+    fake_db = MagicMock()
+    fake_db.update_memories = AsyncMock(return_value=1)
+
+    # A 'summary'-strategy parent whose extracted memory carries NO kind → the
+    # invariant default ("summary") must be stamped (not left None).
+    parent = MemoryRecord(
+        id="msg1",
+        text="a long conversation",
+        memory_type="message",
+        extraction_strategy="summary",
+        extraction_strategy_config={},
+        discrete_memory_extracted="f",
+    )
+    strat = _Strategy([{"text": "a concise summary", "type": "semantic"}])
+
+    with (
+        patch(
+            "agent_memory_server.memory_vector_db_factory.get_memory_vector_db",
+            AsyncMock(return_value=fake_db),
+        ),
+        patch(
+            "agent_memory_server.memory_strategies.get_memory_strategy",
+            return_value=strat,
+        ),
+        patch(
+            "agent_memory_server.long_term_memory.index_long_term_memories",
+            _capture_index,
+        ),
+    ):
+        await ext.extract_memories_with_strategy(memories=[parent], deduplicate=False)
+
+    assert len(captured) == 1
+    assert captured[0].kind == "summary"  # invariant strategy default applied
+    assert captured[0].confidence == settings.extraction_confidence
+
+
+def test_default_kind_for_strategy():
+    from agent_memory_server.extraction import default_kind_for_strategy
+
+    assert default_kind_for_strategy("summary") == "summary"
+    assert default_kind_for_strategy("preferences") == "preference"
+    # Discrete kinds vary per memory → no invariant default.
+    assert default_kind_for_strategy("discrete") is None
+    assert default_kind_for_strategy(None) is None
+    assert default_kind_for_strategy("bogus") is None
