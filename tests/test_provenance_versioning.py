@@ -468,6 +468,24 @@ async def test_as_of_forces_off_server_side_recency():
     assert db.last_ssr is None
 
 
+def test_utc_timestamp_treats_naive_as_utc():
+    # codex F1: BOTH as_of and the stored bounds normalize through _utc_timestamp.
+    naive = datetime(2026, 3, 1, 12, 0, 0)
+    aware = datetime(2026, 3, 1, 12, 0, 0, tzinfo=UTC)
+    assert ltm._utc_timestamp(naive) == ltm._utc_timestamp(aware) == aware.timestamp()
+
+
+@pytest.mark.asyncio
+async def test_as_of_naive_stored_valid_from_boundary():
+    # A record with a NAIVE valid_from must be compared as UTC (not host-local),
+    # so an as_of exactly at that wall-clock instant is start-inclusive (codex F1).
+    naive_from = datetime(2026, 3, 1, 0, 0, 0)  # _T1 wall clock, no tz
+    db = _SearchDB([_windowed("a", "x", valid_from=naive_from)])
+    with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
+        res = await ltm.search_long_term_memories(text="x", limit=5, as_of=_T1)
+    assert {m.id for m in res.memories} == {"a"}
+
+
 def test_as_of_timestamp_treats_naive_as_utc():
     # codex F1: a timezone-less as_of must be interpreted as UTC, not host-local,
     # so it matches the UTC-stored validity windows at the boundary.
