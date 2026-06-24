@@ -420,6 +420,9 @@ def test_coerce_extracted_kind():
     assert coerce_extracted_kind(None) is None
     assert coerce_extracted_kind(123) is None
     assert coerce_extracted_kind("") is None
+    # Unhashable LLM output must NOT raise (a bare `in frozenset` would TypeError).
+    assert coerce_extracted_kind(["fact"]) is None
+    assert coerce_extracted_kind({"kind": "fact"}) is None
 
 
 def test_extraction_confidence_default_is_scored():

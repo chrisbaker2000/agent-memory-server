@@ -36,11 +36,14 @@ VALID_MEMORY_KINDS = frozenset(
 def coerce_extracted_kind(value: object) -> str | None:
     """Coerce an LLM-emitted `kind` to a valid MemoryKind, else None.
 
-    An off-vocabulary or missing `kind` becomes None — which the read path treats
-    as ``fact`` — so a stray extraction value can never raise on MemoryRecord
-    construction (the Literal would reject it) nor silently mislabel.
+    An off-vocabulary, missing, wrong-type, OR unhashable `kind` becomes None —
+    which the read path treats as ``fact`` — so a stray extraction value can never
+    raise on MemoryRecord construction (the Literal would reject it) nor silently
+    mislabel. The ``isinstance(value, str)`` guard is load-bearing: a bare
+    ``value in VALID_MEMORY_KINDS`` raises TypeError if the LLM emits an unhashable
+    ``kind`` (e.g. a list/dict like ``["fact"]``).
     """
-    return value if value in VALID_MEMORY_KINDS else None
+    return value if isinstance(value, str) and value in VALID_MEMORY_KINDS else None
 
 
 # ============================================================================
