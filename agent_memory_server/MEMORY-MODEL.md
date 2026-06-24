@@ -118,34 +118,48 @@ and applies the sentinel only when it is `None`.
 ## Decision 3 — `trust_level` derivation (single-tenant, `source_channel`-keyed)
 
 `trust_level` (`models.py:410`) is **server-managed** — derived at write time,
-never accepted from a client write payload, fail-safe to the lowest tier. Tiers
-(ported from wfr-memory-commons `utils/content_trust.py:49-63`):
-`system` > `first_party` > `agent` (ranks 2 > 1 > 0).
+never accepted from a client write payload, fail-safe to the lowest tier.
 
-wfr-memory-commons derives the tier from `ConsumerId` (multi-tenant — **dropped**
-for homelab). The single-tenant replacement keys off **`source_channel`** (and,
-where needed, family-registry membership of `source_user`):
+**Current fork state (NOT yet the proposal):** the fork ships a **two-tier**
+`TrustLevel` enum — `operator` > `agent` (`utils/content_trust.py:46-63`; FORK.md
+#17), derived from the operator-token check, where `agent` is the fail-safe for
+every LLM/legacy/unclassified write. There is **no** `first_party` tier today, and
+the top tier is named `operator`, not `system`.
+
+**Proposal (LAB-403):** wfr-memory-commons uses a three-tier
+`system > first_party > agent` scheme keyed on `ConsumerId` (multi-tenant —
+**dropped** for homelab). Rather than adopt its names, **extend the fork's
+existing enum additively**: keep the shipped `operator` as the top tier (no
+breaking rename of a persisted field value) and **insert a `first_party` middle
+tier** → `operator` > `first_party` > `agent`. Derive from **`source_channel`**
+(and, where needed, family-registry membership of `source_user`):
 
 | `source_channel` (or writer) | tier | Why |
 |---|---|---|
-| memory-manager / memory-curator / memory-maintenance / migration scripts; operator-token writes | `system` | Canonical maintenance writers; not exposed to untrusted input. Outrank everything for supersede/delete. |
-| `discord` / `slack` / `whatsapp` / `imessage` / `signal` DM from a **family.json** member (incl. Chris) | `first_party` | Authenticated human input relayed by the gateway — not raw third-party content. |
+| memory-manager / memory-curator / memory-maintenance / migration scripts; operator-token writes | `operator` | Canonical maintenance writers; not exposed to untrusted input. Outrank everything for supersede/delete. (Existing top tier — kept, not renamed.) |
+| `discord` / `slack` / `whatsapp` / `imessage` / `signal` DM from a **family.json** member (incl. Chris) | `first_party` *(NEW tier)* | Authenticated human input relayed by the gateway — not raw third-party content. |
 | `mailgun` / `webhook-ingress` (inbound email/webhook) | `agent` | Semi-trusted external content; treat as the injection surface. |
 | subagent / `firecrawl` / web-tool / any tool-derived or inferred write | `agent` | Processes untrusted tool output (the indirect-injection surface). |
 | unknown / unmapped `source_channel` | `agent` (fail-safe) | An unclassified writer is never trusted above the lowest tier. |
 
+LAB-403 therefore makes an **additive** enum change (add `first_party`, keep
+`agent`/`operator`) — existing records with `operator`/`agent`/None are unaffected,
+and the rank function becomes `agent`(0) < `first_party`(1) < `operator`(2).
+
 **Deliberate choice — Chris is NOT privileged above other family members at the
 trust layer.** Both map to `first_party`; the *person* a fact is about is carried
 by `source_user`/text (Decision: subject attribution, LAB-396), not by trust.
-`system` is reserved for non-human maintenance writers so a migration can
+`operator` is reserved for non-human maintenance writers so a migration can
 supersede a canonical record while a human DM cannot clobber another's.
 
 This mapping feeds LAB-403 (`derive_trust_level(source_channel)` +
-`is_reference_protected_mutation` re-keyed from `ConsumerId` → `source_channel`).
-Injection-flagged writes are floored to `agent` + `flagged_for_review` (the
-injection-scan half is already ported — content-security).
+`is_reference_protected_mutation` re-keyed from `ConsumerId` → `source_channel`,
+extending the existing `utils/content_trust.py` two-tier enum). Injection-flagged
+writes are floored to `agent` + `flagged_for_review` (the injection-scan half is
+already ported — content-security).
 
-**Recommendation: adopt the table; reserve `system` for maintenance/migration.**
+**Recommendation: adopt the table; extend the existing enum additively with a
+`first_party` middle tier; keep `operator` as the maintenance/migration top tier.**
 
 ---
 
@@ -177,8 +191,10 @@ backfill is deterministic + reversible + human-review-queued.**
 1. **Extend `kind`** → add `opinion` + `belief` (6 values; `None`=`fact`).
 2. **`confidence`** → first-hand UNSCORED (`None`); inferred 0.7; synthesized 0.6;
    speculative 0.3. Sentinel-preservation verified (`None`≠0).
-3. **`trust_level`** → `source_channel`-keyed: maintenance/migration=`system`,
-   family DM=`first_party`, webhook/subagent/tool=`agent`, unknown=`agent`.
+3. **`trust_level`** → `source_channel`-keyed, **additive** extension of the
+   fork's existing two-tier (`operator`/`agent`) enum with a new `first_party`
+   middle tier: maintenance/migration=`operator`, family DM=`first_party`,
+   webhook/subagent/tool=`agent`, unknown=`agent`. Rank: agent<first_party<operator.
 4. **Backfill** → forward-only; existing 17k untouched; any future backfill
    deterministic + reversible + human-review-gated; reindex only with the
    nomic-embed-text env set.
