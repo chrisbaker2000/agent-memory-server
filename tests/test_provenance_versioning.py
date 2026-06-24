@@ -122,6 +122,23 @@ def test_memory_to_data_bounded_valid_to():
     assert data["valid_to"] == vt.timestamp()
 
 
+def test_memory_to_data_naive_bounds_serialized_as_utc():
+    # codex F1 (write-path TZ blocker): a timezone-NAIVE valid_from/valid_to must
+    # be serialized as UTC epoch, NOT shifted by the host-local offset. Compare
+    # against the explicit UTC interpretation of the same wall clock.
+    db = _db()
+    naive = datetime(2026, 3, 1, 12, 0, 0)  # no tzinfo
+    aware_utc = naive.replace(tzinfo=UTC)
+    data = db._memory_to_data(
+        MemoryRecord(
+            id="p4", text="t", valid_from=naive, valid_to=naive, observed_at=naive
+        )
+    )
+    assert data["valid_from"] == aware_utc.timestamp()
+    assert data["valid_to_ts"] == aware_utc.timestamp()
+    assert data["observed_at"] == aware_utc.timestamp()
+
+
 def test_data_to_memory_result_parses_provenance():
     db = _db()
     now_ts = datetime(2026, 6, 18, tzinfo=UTC).timestamp()
@@ -233,22 +250,41 @@ async def test_funnel_preserves_supplied_observed_at():
 
 
 class _SearchDB:
-    """Returns a fixed result set from search_memories."""
+    """Returns a fixed result set from search_memories.
 
-    def __init__(self, results):
+    Captures the `limit` it was called with (codex F2 over-fetch lock).
+    """
+
+    def __init__(self, results, next_offset=None, raw_total=None):
         self._results = results
+        self._next_offset = next_offset
+        # raw_total simulates a backend total LARGER than the returned page (the
+        # pre-filter over-fetched count) so a test can prove the as_of post-filter
+        # recomputes total. Defaults to len(results).
+        self._raw_total = raw_total if raw_total is not None else len(results)
+        self.last_limit = None
+        self.last_ssr = "unset"
 
     async def search_memories(self, *a, **k):
         from agent_memory_server.models import MemoryRecordResults
 
+        self.last_limit = k.get("limit")
+        self.last_ssr = k.get("server_side_recency")
         return MemoryRecordResults(
-            total=len(self._results), memories=list(self._results), next_offset=None
+            total=self._raw_total,
+            memories=list(self._results),
+            next_offset=self._next_offset,
         )
 
     async def list_memories(self, *a, **k):
         from agent_memory_server.models import MemoryRecordResults
 
-        return MemoryRecordResults(total=0, memories=[], next_offset=None)
+        # Mirror search_memories so the filter-only (empty-text) recall path is
+        # exercisable — used by the as_of filter-only test (codex F2).
+        self.last_limit = k.get("limit")
+        return MemoryRecordResults(
+            total=self._raw_total, memories=list(self._results), next_offset=None
+        )
 
 
 def _result(id_, text, superseded_by=None):
@@ -293,6 +329,250 @@ async def test_recall_keeps_records_missing_superseded_field():
     with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
         res = await ltm.search_long_term_memories(text="memory", limit=10)
     assert {m.id for m in res.memories} == {"legacy"}
+
+
+# --- as_of time-travel recall (LAB-405) ------------------------------------
+
+
+def _windowed(id_, text, valid_from=None, valid_to=None, superseded_by=None):
+    """A search result with an explicit validity window."""
+    base = MemoryRecord(
+        id=id_,
+        text=text,
+        valid_from=valid_from,
+        valid_to=valid_to,
+        superseded_by=superseded_by,
+    )
+    return MemoryRecordResult(**base.model_dump(), dist=0.1)
+
+
+_T0 = datetime(2026, 1, 1, tzinfo=UTC)
+_T1 = datetime(2026, 3, 1, tzinfo=UTC)
+_T2 = datetime(2026, 6, 1, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_as_of_excludes_not_yet_valid_records():
+    # A record whose validity STARTS after as_of must be excluded.
+    db = _SearchDB(
+        [
+            _windowed("early", "valid early", valid_from=_T0),
+            _windowed("future", "not valid yet", valid_from=_T2),
+        ]
+    )
+    with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
+        res = await ltm.search_long_term_memories(text="valid", limit=10, as_of=_T1)
+    assert {m.id for m in res.memories} == {"early"}
+    assert res.total == 1
+
+
+@pytest.mark.asyncio
+async def test_as_of_filter_only_listing_applies_window():
+    # codex F2: empty text → filter-only list_memories path, which returns BEFORE
+    # the vector-path post-filter. The as_of window must still be applied there.
+    db = _SearchDB(
+        [
+            _windowed("early", "valid early", valid_from=_T0),
+            _windowed("future", "not valid yet", valid_from=_T2),
+        ]
+    )
+    with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
+        res = await ltm.search_long_term_memories(text="", limit=10, as_of=_T1)
+    assert {m.id for m in res.memories} == {"early"}
+    assert res.total == 1
+
+
+@pytest.mark.asyncio
+async def test_as_of_includes_superseded_record_valid_then():
+    # A record valid at as_of but superseded AFTERWARDS (valid_to after as_of)
+    # must be included — as_of overrides the default superseded-hide.
+    db = _SearchDB(
+        [
+            _windowed("new", "current value", valid_from=_T2),
+            _windowed(
+                "old",
+                "old value",
+                valid_from=_T0,
+                valid_to=_T2,
+                superseded_by="new",
+            ),
+        ]
+    )
+    with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
+        res = await ltm.search_long_term_memories(text="value", limit=10, as_of=_T1)
+    # at _T1: "old" is valid (T0 <= T1 < T2); "new" not yet valid (valid_from T2).
+    assert {m.id for m in res.memories} == {"old"}
+
+
+@pytest.mark.asyncio
+async def test_as_of_excludes_window_ended_at_or_before():
+    # `valid_to <= as_of` (end-exclusive) → excluded.
+    db = _SearchDB(
+        [
+            _windowed("ended", "ended exactly at as_of", valid_from=_T0, valid_to=_T1),
+            _windowed("open", "still valid", valid_from=_T0),
+        ]
+    )
+    with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
+        res = await ltm.search_long_term_memories(text="valid", limit=10, as_of=_T1)
+    assert {m.id for m in res.memories} == {"open"}
+
+
+@pytest.mark.asyncio
+async def test_as_of_open_ended_record_always_currently_valid():
+    # valid_to None (open) → always currently-valid at any as_of >= valid_from.
+    db = _SearchDB([_windowed("open", "open record", valid_from=_T0)])
+    with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
+        res = await ltm.search_long_term_memories(text="open", limit=10, as_of=_T2)
+    assert {m.id for m in res.memories} == {"open"}
+
+
+@pytest.mark.asyncio
+async def test_as_of_legacy_record_no_valid_from_has_no_lower_bound():
+    # Legacy record (valid_from None, valid_to None) → always valid at any as_of.
+    db = _SearchDB([_windowed("legacy", "pre-versioning")])
+    with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
+        res = await ltm.search_long_term_memories(text="legacy", limit=10, as_of=_T0)
+    assert {m.id for m in res.memories} == {"legacy"}
+
+
+@pytest.mark.asyncio
+async def test_as_of_overfetches_db_limit():
+    # codex F2: with as_of set, the DB is queried with an over-fetched limit so
+    # the window post-filter has a larger candidate pool than the caller's limit.
+    db = _SearchDB([_windowed("a", "x", valid_from=_T0)])
+    with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
+        await ltm.search_long_term_memories(text="x", limit=5, as_of=_T1)
+    assert db.last_limit > 5
+    assert db.last_limit == min(max(5, 5 * 5), 200)
+
+
+@pytest.mark.asyncio
+async def test_no_as_of_queries_exact_limit():
+    # Default (no as_of) must NOT over-fetch — db limit == caller limit.
+    db = _SearchDB([_windowed("a", "x")])
+    with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
+        await ltm.search_long_term_memories(text="x", limit=5)
+    assert db.last_limit == 5
+
+
+@pytest.mark.asyncio
+async def test_as_of_truncates_overfetched_pool_to_limit():
+    # An over-fetched pool with more valid-at-as_of records than `limit` is
+    # truncated back to `limit` after the window filter (codex F2).
+    db = _SearchDB(
+        [
+            _windowed("v1", "valid 1", valid_from=_T0),
+            _windowed("v2", "valid 2", valid_from=_T0),
+            _windowed("v3", "valid 3", valid_from=_T0),
+        ]
+    )
+    with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
+        res = await ltm.search_long_term_memories(text="valid", limit=2, as_of=_T1)
+    assert len(res.memories) == 2
+    assert res.total == 2
+
+
+@pytest.mark.asyncio
+async def test_as_of_forces_off_server_side_recency():
+    # codex F1: the SSR aggregation backend omits valid_from/valid_to, so as_of
+    # must NOT use it — the function downgrades server_side_recency to None.
+    db = _SearchDB([_windowed("a", "x", valid_from=_T0)])
+    with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
+        await ltm.search_long_term_memories(
+            text="x", limit=5, as_of=_T1, server_side_recency=True
+        )
+    assert db.last_ssr is None
+
+
+def test_utc_timestamp_treats_naive_as_utc():
+    # codex F1: BOTH as_of and the stored bounds normalize through _utc_timestamp.
+    naive = datetime(2026, 3, 1, 12, 0, 0)
+    aware = datetime(2026, 3, 1, 12, 0, 0, tzinfo=UTC)
+    assert ltm._utc_timestamp(naive) == ltm._utc_timestamp(aware) == aware.timestamp()
+
+
+@pytest.mark.asyncio
+async def test_as_of_naive_stored_valid_from_boundary():
+    # A record with a NAIVE valid_from must be compared as UTC (not host-local),
+    # so an as_of exactly at that wall-clock instant is start-inclusive (codex F1).
+    naive_from = datetime(2026, 3, 1, 0, 0, 0)  # _T1 wall clock, no tz
+    db = _SearchDB([_windowed("a", "x", valid_from=naive_from)])
+    with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
+        res = await ltm.search_long_term_memories(text="x", limit=5, as_of=_T1)
+    assert {m.id for m in res.memories} == {"a"}
+
+
+def test_as_of_timestamp_treats_naive_as_utc():
+    # codex F1: a timezone-less as_of must be interpreted as UTC, not host-local,
+    # so it matches the UTC-stored validity windows at the boundary.
+    naive = datetime(2026, 3, 1, 12, 0, 0)
+    aware = datetime(2026, 3, 1, 12, 0, 0, tzinfo=UTC)
+    assert ltm._as_of_timestamp(naive) == ltm._as_of_timestamp(aware)
+    assert ltm._as_of_timestamp(aware) == aware.timestamp()
+
+
+@pytest.mark.asyncio
+async def test_as_of_naive_boundary_matches_utc_window():
+    # A naive as_of exactly at a UTC valid_from is included (start-inclusive),
+    # proving naive→UTC normalization (host-local would shift the boundary).
+    db = _SearchDB([_windowed("a", "x", valid_from=_T1)])
+    naive_t1 = datetime(2026, 3, 1, tzinfo=None)  # == _T1 wall clock, no tz
+    with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
+        res = await ltm.search_long_term_memories(text="x", limit=5, as_of=naive_t1)
+    assert {m.id for m in res.memories} == {"a"}
+
+
+@pytest.mark.asyncio
+async def test_as_of_recall_is_single_page_next_offset_none():
+    # codex F2: the over-fetch + window post-filter breaks the raw next_offset
+    # mapping, so as_of recall nulls next_offset (single-page) rather than skip or
+    # re-scan valid rows across pages.
+    db = _SearchDB([_windowed("a", "x", valid_from=_T0)], next_offset=99)
+    with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
+        res = await ltm.search_long_term_memories(text="x", limit=5, as_of=_T1)
+    assert res.next_offset is None
+
+
+@pytest.mark.asyncio
+async def test_as_of_total_matches_window_result_all_valid():
+    # codex F1 follow-up: when the window filter drops nothing, total must still
+    # equal the returned (windowed/truncated) count — not the raw over-fetched
+    # DB total. Mock returns total=99 but only the page is windowed.
+    # raw_total=99 simulates an inflated backend total; the window drops nothing,
+    # so total must be recomputed to the returned count (2), not left at 99.
+    db = _SearchDB(
+        [_windowed("a", "x", valid_from=_T0), _windowed("b", "y", valid_from=_T0)],
+        raw_total=99,
+    )
+    with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
+        res = await ltm.search_long_term_memories(text="x", limit=5, as_of=_T1)
+    assert res.total == len(res.memories) == 2
+
+
+@pytest.mark.asyncio
+async def test_as_of_empty_page_still_nulls_next_offset():
+    # codex follow-up: if an earlier filter empties the page before the as_of block,
+    # next_offset must still be nulled (never leak a stale DB cursor under as_of).
+    db = _SearchDB([], next_offset=42)
+    with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
+        res = await ltm.search_long_term_memories(text="x", limit=5, as_of=_T1)
+    assert res.memories == []
+    assert res.next_offset is None
+
+
+@pytest.mark.asyncio
+async def test_no_as_of_recall_unchanged_still_hides_superseded():
+    # Default (no as_of): byte-for-byte unchanged — superseded-hide still applies.
+    db = _SearchDB(
+        [
+            _windowed("a", "current"),
+            _windowed("b", "old", superseded_by="a"),
+        ]
+    )
+    with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
+        res = await ltm.search_long_term_memories(text="x", limit=10)
+    assert {m.id for m in res.memories} == {"a"}
 
 
 # --- supersede_memory state machine ----------------------------------------

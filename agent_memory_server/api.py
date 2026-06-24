@@ -719,7 +719,7 @@ async def create_long_term_memory(
         raise HTTPException(
             status_code=503,
             detail=f"Memory indexing failed (embedding service may be down): {e}",
-        )
+        ) from e
     return StoreMemoryResponse(
         status="ok",
         similar_memories=similar_memories_map,
@@ -757,6 +757,7 @@ async def search_long_term_memory(
         "offset": payload.offset,
         "optimize_query": optimize_query,
         "include_superseded": payload.include_superseded,
+        "as_of": payload.as_of,
         "bypass_recall_filters": payload.bypass_recall_filters,
         **filters,
     }
@@ -765,12 +766,19 @@ async def search_long_term_memory(
 
     logger.debug(f"Long-term search kwargs: {kwargs}")
 
-    # Server-side recency rerank toggle
+    # Server-side recency rerank toggle.
+    # codex F1 (LAB-405): the SSR aggregation backend
+    # (RecencyAggregationQuery.DEFAULT_RETURN_FIELDS) does NOT return valid_from/
+    # valid_to, so the as_of validity-window post-filter would see them as None
+    # and silently pass future/expired records. as_of therefore forces the
+    # standard recency path (which hydrates the validity fields) — both still
+    # produce recency-ordered results. (valid_from is store-and-return only;
+    # indexing it for an SSR predicate would need a reindex, out of scope.)
     server_side_recency = (
         payload.server_side_recency
         if payload.server_side_recency is not None
         else False
-    )
+    ) and payload.as_of is None
     if server_side_recency:
         kwargs["server_side_recency"] = True
         kwargs["recency_params"] = _build_recency_params(payload)

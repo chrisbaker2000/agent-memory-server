@@ -1159,7 +1159,7 @@ _NOISE_TWEET_LOG = re.compile(
 )
 
 _NOISE_META_MEMORY = re.compile(
-    r"memory.system.*(?:overhaul|redesign|audit|cleanup|migration|restore)|"
+    r"memory.system.*(?:overhaul|redesign|audit|review|cleanup|reindex|migration|restore)|"
     r"memory.(?:quality|maintenance|compaction|dedup|consolidat).*(?:ran|completed|phase)|"
     r"mega.memory.*(?:split|decompos)|"
     r"(?:disabled|permanently).*dream.cycle|dream.cycle.*(?:disabled|prompt|configured)|"
@@ -1169,7 +1169,61 @@ _NOISE_META_MEMORY = re.compile(
     r"memories.*were.*(?:cleaned|fixed|purged|deleted|restored)|"
     r"decomposition.*(?:task|workflow).*(?:stored|completed)|"
     r"memory.*hygiene|memory.*remediation|"
+    # Reverse word order: "...audit of the memory system" / "review the memory
+    # system" (the forward "memory.system.*audit" alternation above misses these).
+    r"(?:audit|overhaul|redesign|review|cleanup|reindex).{0,30}memory.system|"
     r"stored a backup file named",
+    re.IGNORECASE,
+)
+
+# Test-harness artifacts: contract/smoke/e2e test fixtures that leak into the
+# corpus as if they were durable facts (LAB-406). "observes the moon" /
+# "unique-marker-" are the seeded contract-test fixture markers.
+_NOISE_TEST_ARTIFACT = re.compile(
+    # TIGHTENED (codex F1, gateway-half parity): require a noise-context suffix or
+    # a colon so a durable fact merely mentioning testing ("prefers contract test
+    # coverage before deploys") is NOT rejected at the write funnel. unique-marker
+    # anchored to its hex id shape.
+    r"\b(?:contract|smoke|e2e) test(?:\s+(?:marker|fixture|artifact|message|response)|:)|"
+    r"\btest artifact\b|"
+    r"\bunique-marker-[0-9a-f-]{8,}|"
+    r"\bpat observes the moon\b",
+    re.IGNORECASE,
+)
+
+# Heartbeat / liveness check spam (LAB-406): "Pat reported HEARTBEAT_OK after a
+# heartbeat check." — operational liveness pings, never durable knowledge.
+_NOISE_HEARTBEAT = re.compile(
+    r"\bHEARTBEAT_OK\b|"
+    # Both "heartbeat check" and "reported a heartbeat" only count as noise when
+    # an OPERATIONAL actor precedes them — never a bare medical/family phrase.
+    # "Grant has a heartbeat check with cardiology on Friday" and "The
+    # cardiologist reported a heartbeat during the ultrasound" are durable health
+    # facts, NOT noise (codex F1: over-filtering health facts is corruption here).
+    r"\b(?:gateway|service|server|monitor|agent|fleet|bot|cron|daemon|liveness)\b.{0,40}"
+    r"\bheartbeat[ _-]?check\b|"
+    r"\b(?:gateway|service|server|monitor|agent|fleet|bot|cron|daemon|liveness)\b.{0,40}"
+    r"\breported\s+(?:a\s+)?heartbeat\b",
+    re.IGNORECASE,
+)
+
+# Daily biometric log dumps (LAB-406): dated WHOOP recovery/HRV/RHR/strain
+# readings (the ~218 "Lindsey's WHOOP 2026-03-20 — Recovery 52%" daily logs).
+# Requires a DAILY-LOG MARKER (date / daily / logged / reading / today) in
+# addition to WHOOP + a numeric metric reading, so a durable WHOOP THRESHOLD or
+# PREFERENCE ("treats WHOOP recovery under 40% as a rest-day signal") is NOT
+# dropped at the write funnel (codex F1) — only actual daily dumps match.
+# Durable health facts that merely mention heart rate / training zones (no WHOOP)
+# were never caught (WHOOP is required).
+_NOISE_DAILY_BIOMETRIC = re.compile(
+    r"\bWHOOP\b"
+    # daily-log markers ONLY — `reading` was dropped (codex F1): it's too generic
+    # ("WHOOP recovery reading under 40%" is a durable threshold preference, not a
+    # daily dump). A real daily dump carries a date / "daily" / "logged" / "today".
+    r"(?=[^.]{0,80}\b(?:\d{4}-\d{2}-\d{2}|daily|logged|today)\b)"
+    r"[^.]{0,80}?"
+    r"\b(?:recovery|strain|hrv|rhr|resting heart rate|sleep performance)\b"
+    r"[^.]{0,20}?\d",
     re.IGNORECASE,
 )
 
@@ -1192,7 +1246,11 @@ _NOISE_MONITORING = re.compile(
     r"no raw.scanner|no individual file|"
     r"(?:PDF|document|file) renamed from (?:scan_|document_)|"
     r"all (?:docker |homelab )?services (?:are )?healthy(?!\s*\w)|"
-    r"^backup completed successfully$",
+    # LAB-406: was over-anchored as ^...$, so "Nightly backup completed
+    # successfully: …" (the real shape) slipped through. Match the phrase
+    # anywhere — a "backup completed successfully" line is pure ops noise
+    # regardless of surrounding words.
+    r"backup completed successfully",
     re.IGNORECASE,
 )
 
@@ -1205,13 +1263,55 @@ def _is_noise_content(text: str) -> bool:
     - Meta-memories about the memory system itself
     - Analytics/BigQuery schema dumps
     - Monitoring status reports and file-operation records
+    - Test-harness artifacts (contract/smoke/e2e fixtures) (LAB-406)
+    - Heartbeat / liveness-check spam (LAB-406)
+    - Dated WHOOP daily-biometric log dumps (LAB-406)
     """
     return bool(
         _NOISE_TWEET_LOG.search(text)
         or _NOISE_META_MEMORY.search(text)
         or _NOISE_ANALYTICS_SCHEMA.search(text)
         or _NOISE_MONITORING.search(text)
+        or _NOISE_TEST_ARTIFACT.search(text)
+        or _NOISE_HEARTBEAT.search(text)
+        or _NOISE_DAILY_BIOMETRIC.search(text)
     )
+
+
+def _utc_timestamp(value: datetime) -> float:
+    """Epoch seconds for a datetime, treating timezone-naive values as UTC (codex F1).
+
+    BOTH the query `as_of` AND the stored `valid_from`/`valid_to` bounds are
+    client-settable and may be unzoned; stored windows are conceptually UTC, so a
+    bare `.timestamp()` (host-local) on a non-UTC host could include/exclude the
+    wrong record near a boundary. Normalize every datetime through this before
+    comparing. Pure + side-effect-free.
+    """
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC).timestamp()
+
+
+def _within_validity_window(m: MemoryRecordResult, as_of_ts: float) -> bool:
+    """LAB-405: True if record `m`'s validity window contains the instant `as_of_ts`.
+
+    `valid_from <= as_of < valid_to` (end-exclusive). Graceful on legacy records:
+    `valid_from` None → no lower bound (always-started); `valid_to` None (open) →
+    always currently-valid (no upper bound). Stored bounds are UTC-normalized
+    (codex F1) so a naive client-set bound compares correctly on any host.
+    Pure + side-effect-free.
+    """
+    if m.valid_from is not None and as_of_ts < _utc_timestamp(m.valid_from):
+        return False  # not yet valid at as_of
+    if m.valid_to is not None and as_of_ts >= _utc_timestamp(m.valid_to):
+        return False  # validity ended at/before as_of
+    return True
+
+
+def _as_of_timestamp(as_of: datetime) -> float:
+    """Epoch seconds for an `as_of` value (timezone-naive treated as UTC). Thin
+    alias over `_utc_timestamp` kept for call-site readability."""
+    return _utc_timestamp(as_of)
 
 
 # Source user normalization — maps slugified names back to full names.
@@ -1681,6 +1781,7 @@ async def search_long_term_memories(
     kind: Kind | None = None,
     min_confidence: MinConfidence | None = None,
     include_superseded: bool = False,
+    as_of: datetime | None = None,
     server_side_recency: bool | None = None,
     recency_params: dict | None = None,
     limit: int = 10,
@@ -1715,6 +1816,23 @@ async def search_long_term_memories(
     Returns:
         MemoryRecordResults containing matching memories
     """
+    # LAB-405 (codex F2): when as_of is set, the validity-window post-filter can
+    # trim the raw page below `limit`, so over-fetch a bounded multiple from the
+    # DB and truncate back to `limit` AFTER filtering — a valid-at-as_of record
+    # just past the raw `limit` is then still considered, and an all-invalid first
+    # page no longer collapses to total=0. Deep offset pagination under as_of stays
+    # best-effort: a complete fix needs valid_from indexed (a reindex, out of scope
+    # per FORK.md #28); valid_from is store-and-return only.
+    db_limit = limit if as_of is None else min(max(limit, limit * 5), 200)
+
+    # codex F1: the server-side-recency aggregation backend does not return
+    # valid_from/valid_to, so the as_of window post-filter would see them as None
+    # and pass future/expired records. Force as_of off the SSR path here too
+    # (defense-in-depth — the API route guards this as well). Direct callers are
+    # then safe regardless of how they set server_side_recency.
+    if as_of is not None:
+        server_side_recency = None
+
     # If no query text is provided, perform a filter-only listing (no semantic search).
     # This enables patterns like: "return all memories for this user/namespace".
     if not (text or "").strip():
@@ -1734,9 +1852,26 @@ async def search_long_term_memories(
             source_channel=source_channel,
             visibility=visibility,
             stale_after=stale_after,
-            limit=limit,
+            limit=db_limit,
             offset=offset,
         )
+        # LAB-405 (codex F2): the filter-only listing path returns BEFORE the
+        # vector-path as_of post-filter below, so time-travel recall must be
+        # applied here too — otherwise a metadata-only "list all" recall with
+        # as_of would leak future/expired records. Over-fetched db_limit is
+        # window-filtered then truncated back to `limit`.
+        if as_of is not None:
+            # codex F2 + total-consistency follow-up: as_of recall is ALWAYS
+            # single-page. Null next_offset and recompute total UNCONDITIONALLY
+            # (even on an empty/all-valid offset page) — the raw DB total/cursor
+            # reflect the over-fetched pre-filter page, not the windowed result.
+            if listing.memories:
+                as_of_ts = _as_of_timestamp(as_of)
+                listing.memories = [
+                    m for m in listing.memories if _within_validity_window(m, as_of_ts)
+                ][:limit]
+            listing.total = len(listing.memories)
+            listing.next_offset = None
         await _observe_recall_egress(
             len(listing.memories), exempt=bypass_recall_filters
         )
@@ -1796,7 +1931,7 @@ async def search_long_term_memories(
         distance_threshold=distance_threshold,
         server_side_recency=server_side_recency,
         recency_params=recency_params,
-        limit=limit,
+        limit=db_limit,
         offset=offset,
     )
 
@@ -1830,7 +1965,7 @@ async def search_long_term_memories(
                 distance_threshold=distance_threshold,
                 server_side_recency=server_side_recency,
                 recency_params=recency_params,
-                limit=limit,
+                limit=db_limit,
                 offset=offset,
             )
     except Exception as e:
@@ -1879,13 +2014,47 @@ async def search_long_term_memories(
             results.memories = [m for i, m in enumerate(results.memories) if i in kept]
             results.total = len(results.memories)
 
+    # Time-travel recall (LAB-405). When `as_of` is set, the validity window is the
+    # authoritative filter: keep records valid at that instant
+    # (`valid_from <= as_of < valid_to`) and SKIP the default superseded-hide below —
+    # a record superseded AFTER as_of was still valid then (its valid_to is later than
+    # as_of) and must appear. Done as a post-filter (NOT a Redis predicate) so legacy
+    # records lacking valid_from/valid_to degrade gracefully:
+    #   - valid_from None  → no lower bound (always-started)
+    #   - valid_to   None  → open-ended, always currently-valid (no upper bound)
+    if as_of is not None:
+        # codex F2/follow-up: as_of recall is ALWAYS single-page. Null next_offset
+        # unconditionally — the over-fetch + window post-filter breaks the raw
+        # next_offset mapping, and an earlier filter (relevance gate) may already
+        # have emptied results.memories, so this must run even on an empty page
+        # rather than leak a stale DB cursor.
+        results.next_offset = None
+        if results.memories:
+            as_of_ts = _as_of_timestamp(as_of)
+            before = len(results.memories)
+            # Window-filter the over-fetched candidate pool (db_limit), then
+            # truncate back to the caller's `limit`.
+            results.memories = [
+                m for m in results.memories if _within_validity_window(m, as_of_ts)
+            ][:limit]
+            excluded = before - len(results.memories)
+            if excluded:
+                logger.debug(
+                    f"[search_long_term_memories] as_of={as_of.isoformat()} "
+                    f"excluded/truncated {excluded} record(s) (db_limit={db_limit})"
+                )
+        # total-consistency follow-up: recompute total UNCONDITIONALLY (not only
+        # when records were excluded) — the raw DB total reflects the over-fetched
+        # pre-filter page, so an all-valid or empty offset page would otherwise
+        # leave a stale/inflated total while next_offset is already nulled.
+        results.total = len(results.memories)
     # Supersede-hiding (versioning; ported from wfr-memory-commons). By default,
     # records that have been replaced by a newer version (superseded_by set) are
     # hidden from recall. Done as a post-filter — NOT a Redis query predicate —
     # so records written before this field existed (no superseded_by on the hash)
     # are correctly treated as "not superseded" and always kept. include_superseded
-    # surfaces them (e.g. for history/audit views).
-    if not include_superseded and results.memories:
+    # surfaces them (e.g. for history/audit views). Skipped under as_of (above).
+    elif not include_superseded and results.memories:
         before = len(results.memories)
         results.memories = [m for m in results.memories if not m.superseded_by]
         hidden = before - len(results.memories)
