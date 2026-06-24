@@ -610,3 +610,81 @@ class TestSpecializedFilters:
         filter_obj = Topics(any=["topic1", "topic2"])
         result = filter_obj.to_filter()
         assert isinstance(result, FilterExpression)
+
+
+class TestTagFilterNone:
+    """Tests for TagFilter `none` (negation) predicate — LAB-401.
+
+    Before this fix, a `{none: [...]}` filter (which the JS agent-memory-client
+    SDK emits) was silently dropped by the Pydantic model, leaving every
+    predicate None, so `to_filter()` raised "No filter provided" → HTTP 500.
+    """
+
+    def test_none_creates_negated_tag_filter(self):
+        filter_obj = TagFilter(field="topics", none=["family", "work"])
+        result = filter_obj.to_filter()
+        assert isinstance(result, FilterExpression)
+        # RedisVL renders Tag != [list] as a NONE-of expression.
+        assert str(result) == "(-@topics:{family|work})"
+
+    def test_none_single_value(self):
+        result = TagFilter(field="topics", none=["family"]).to_filter()
+        assert str(result) == "(-@topics:{family})"
+
+    def test_topics_none_filter(self):
+        result = Topics(none=["family"]).to_filter()
+        assert str(result) == "(-@topics:{family})"
+
+    def test_none_empty_list_raises(self):
+        with pytest.raises(ValueError, match="none cannot be an empty list"):
+            TagFilter(field="topics", none=[])
+
+    def test_none_cannot_combine_with_eq(self):
+        with pytest.raises(ValueError, match="none and eq cannot both be set"):
+            TagFilter(field="topics", none=["a"], eq="b")
+
+    def test_none_cannot_combine_with_any(self):
+        with pytest.raises(ValueError, match="none and any cannot both be set"):
+            TagFilter(field="topics", none=["a"], any=["b"])
+
+    def test_none_cannot_combine_with_all(self):
+        with pytest.raises(ValueError, match="none and all cannot both be set"):
+            TagFilter(field="topics", none=["a"], all=["b"])
+
+    def test_none_cannot_combine_with_ne(self):
+        with pytest.raises(ValueError, match="none and ne cannot both be set"):
+            TagFilter(field="topics", none=["a"], ne="b")
+
+    def test_none_cannot_combine_with_startswith(self):
+        with pytest.raises(ValueError, match="startswith and none cannot both be set"):
+            TagFilter(field="topics", none=["a"], startswith="p")
+
+    def test_existing_any_filter_unaffected(self):
+        """Regression: the positive `any` path still works after adding `none`."""
+        result = TagFilter(field="topics", any=["t1", "t2"]).to_filter()
+        assert str(result) == "@topics:{t1|t2}"
+
+
+class TestEnumFilterNone:
+    """Tests for EnumFilter `none` (negation) predicate — LAB-401."""
+
+    def test_none_creates_negated_filter(self):
+        result = EnumFilter(
+            field="status", enum_class=_SampleEnum, none=["value1", "value2"]
+        ).to_filter()
+        assert isinstance(result, FilterExpression)
+        assert str(result) == "(-@status:{value1|value2})"
+
+    def test_none_invalid_enum_value_raises(self):
+        with pytest.raises(ValueError, match="not in valid enum values"):
+            EnumFilter(field="status", enum_class=_SampleEnum, none=["bogus"])
+
+    def test_none_empty_list_raises(self):
+        with pytest.raises(ValueError, match="none cannot be an empty list"):
+            EnumFilter(field="status", enum_class=_SampleEnum, none=[])
+
+    def test_none_cannot_combine_with_any(self):
+        with pytest.raises(ValueError, match="none and any cannot both be set"):
+            EnumFilter(
+                field="status", enum_class=_SampleEnum, none=["value1"], any=["value2"]
+            )

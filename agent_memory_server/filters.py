@@ -14,6 +14,7 @@ class TagFilter(BaseModel):
     ne: str | None = None
     any: list[str] | None = None
     all: list[str] | None = None
+    none: list[str] | None = None
     startswith: str | None = None
 
     @model_validator(mode="after")
@@ -26,6 +27,22 @@ class TagFilter(BaseModel):
             raise ValueError("all cannot be an empty list")
         if self.any is not None and len(self.any) == 0:
             raise ValueError("any cannot be an empty list")
+        # `none` (negation: NONE of these tags present) is the list form of `ne`
+        # and is mutually exclusive with every positive/other predicate. Without
+        # this, the client SDK's `none` filter (which the JS client emits) silently
+        # dropped every field and `to_filter()` raised "No filter provided" → HTTP
+        # 500 (LAB-401). RedisVL's `Tag != [list]` renders `-@field:{a|b}` = none-of.
+        if self.none is not None:
+            if len(self.none) == 0:
+                raise ValueError("none cannot be an empty list")
+            if self.eq is not None:
+                raise ValueError("none and eq cannot both be set")
+            if self.ne is not None:
+                raise ValueError("none and ne cannot both be set")
+            if self.any is not None:
+                raise ValueError("none and any cannot both be set")
+            if self.all is not None:
+                raise ValueError("none and all cannot both be set")
         # Validate startswith doesn't combine with other filters
         if self.startswith is not None:
             if self.startswith == "":
@@ -38,6 +55,8 @@ class TagFilter(BaseModel):
                 raise ValueError("startswith and any cannot both be set")
             if self.all is not None:
                 raise ValueError("startswith and all cannot both be set")
+            if self.none is not None:
+                raise ValueError("startswith and none cannot both be set")
         return self
 
     def to_filter(self) -> FilterExpression:
@@ -62,6 +81,9 @@ class TagFilter(BaseModel):
             for f in filters[1:]:
                 result = result & f
             return result
+        if self.none is not None:
+            # NONE-of semantics: exclude any record carrying one of these tags.
+            return Tag(self.field) != self.none
         raise ValueError("No filter provided")
 
 
@@ -74,6 +96,7 @@ class EnumFilter(BaseModel):
     ne: str | None = None
     any: list[str] | None = None
     all: list[str] | None = None
+    none: list[str] | None = None
 
     @model_validator(mode="after")
     def validate_filters(self) -> Self:
@@ -85,6 +108,19 @@ class EnumFilter(BaseModel):
             raise ValueError("all cannot be an empty list")
         if self.any is not None and len(self.any) == 0:
             raise ValueError("any cannot be an empty list")
+        # `none` (negation) is mutually exclusive with every other predicate;
+        # see TagFilter for why the missing field caused a 500 (LAB-401).
+        if self.none is not None:
+            if len(self.none) == 0:
+                raise ValueError("none cannot be an empty list")
+            if self.eq is not None:
+                raise ValueError("none and eq cannot both be set")
+            if self.ne is not None:
+                raise ValueError("none and ne cannot both be set")
+            if self.any is not None:
+                raise ValueError("none and any cannot both be set")
+            if self.all is not None:
+                raise ValueError("none and all cannot both be set")
 
         # Validate enum values
         valid_values = [e.value for e in self.enum_class]
@@ -109,6 +145,12 @@ class EnumFilter(BaseModel):
                     raise ValueError(
                         f"all value '{val}' not in valid enum values: {valid_values}"
                     )
+        if self.none is not None:
+            for val in self.none:
+                if val not in valid_values:
+                    raise ValueError(
+                        f"none value '{val}' not in valid enum values: {valid_values}"
+                    )
 
         return self
 
@@ -125,6 +167,8 @@ class EnumFilter(BaseModel):
             for f in filters[1:]:
                 result = result & f
             return result
+        if self.none is not None:
+            return Tag(self.field) != self.none
         raise ValueError("No filter provided")
 
 
