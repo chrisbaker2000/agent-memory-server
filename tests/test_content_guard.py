@@ -347,6 +347,13 @@ class TestDailyBiometricNoise:
             "Lindsey treats WHOOP recovery under 40% as a signal to take a rest day."
         )
 
+    def test_whoop_metric_threshold_reading_preference_not_noise(self):
+        """A durable threshold can naturally call the metric a "reading" — `reading`
+        is NOT a daily-log marker (codex F1 round 2)."""
+        assert not _is_noise_content(
+            "Lindsey treats a WHOOP recovery reading under 40% as a rest-day signal."
+        )
+
 
 class TestMetaReverseOrderNoise:
     """Verify reverse-word-order meta-memories (LAB-406) are caught."""

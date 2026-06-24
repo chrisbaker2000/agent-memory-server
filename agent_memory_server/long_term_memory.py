@@ -1217,7 +1217,10 @@ _NOISE_HEARTBEAT = re.compile(
 # were never caught (WHOOP is required).
 _NOISE_DAILY_BIOMETRIC = re.compile(
     r"\bWHOOP\b"
-    r"(?=[^.]{0,80}\b(?:\d{4}-\d{2}-\d{2}|daily|logged|reading|today)\b)"
+    # daily-log markers ONLY — `reading` was dropped (codex F1): it's too generic
+    # ("WHOOP recovery reading under 40%" is a durable threshold preference, not a
+    # daily dump). A real daily dump carries a date / "daily" / "logged" / "today".
+    r"(?=[^.]{0,80}\b(?:\d{4}-\d{2}-\d{2}|daily|logged|today)\b)"
     r"[^.]{0,80}?"
     r"\b(?:recovery|strain|hrv|rhr|resting heart rate|sleep performance)\b"
     r"[^.]{0,20}?\d",
