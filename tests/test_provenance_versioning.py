@@ -560,7 +560,7 @@ async def test_strategy_aware_extraction_stamps_kind_and_confidence():
         extraction_strategy_config={},
         discrete_memory_extracted="f",
     )
-    strat = _Strategy([{"text": "a concise summary", "type": "semantic"}])
+    strategy = _Strategy([{"text": "a concise summary", "type": "semantic"}])
 
     with (
         patch(
@@ -569,7 +569,7 @@ async def test_strategy_aware_extraction_stamps_kind_and_confidence():
         ),
         patch(
             "agent_memory_server.memory_strategies.get_memory_strategy",
-            return_value=strat,
+            return_value=strategy,
         ),
         patch(
             "agent_memory_server.long_term_memory.index_long_term_memories",
