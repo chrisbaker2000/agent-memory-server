@@ -390,7 +390,14 @@ jobs:
           ${JSON_OPEN}
           \`\`\`\`json
           EOF
-              cat "$RENDER_FILE"
+              # Embed the FULL raw Codex output (not the trimmed RENDER_FILE) under
+              # the "for Claude Code parsers" sentinels — a downstream automation must
+              # never receive truncated/non-applyable fix_diffs. The 64KB layer-2/3
+              # backstops below drop the JSON entirely (pointer to artifact) if the
+              # full body exceeds GitHub's comment cap, so the embedded JSON is always
+              # either complete or absent — never silently trimmed. The trimmed
+              # RENDER_FILE is used only for the human-facing rendered markdown above.
+              cat "$REVIEW_FILE"
               cat <<EOF
           \`\`\`\`
           ${JSON_CLOSE}
