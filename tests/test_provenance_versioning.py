@@ -233,14 +233,19 @@ async def test_funnel_preserves_supplied_observed_at():
 
 
 class _SearchDB:
-    """Returns a fixed result set from search_memories."""
+    """Returns a fixed result set from search_memories.
+
+    Captures the `limit` it was called with (codex F2 over-fetch lock).
+    """
 
     def __init__(self, results):
         self._results = results
+        self.last_limit = None
 
     async def search_memories(self, *a, **k):
         from agent_memory_server.models import MemoryRecordResults
 
+        self.last_limit = k.get("limit")
         return MemoryRecordResults(
             total=len(self._results), memories=list(self._results), next_offset=None
         )
@@ -250,6 +255,7 @@ class _SearchDB:
 
         # Mirror search_memories so the filter-only (empty-text) recall path is
         # exercisable — used by the as_of filter-only test (codex F2).
+        self.last_limit = k.get("limit")
         return MemoryRecordResults(
             total=len(self._results), memories=list(self._results), next_offset=None
         )
@@ -402,6 +408,43 @@ async def test_as_of_legacy_record_no_valid_from_has_no_lower_bound():
     with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
         res = await ltm.search_long_term_memories(text="legacy", limit=10, as_of=_T0)
     assert {m.id for m in res.memories} == {"legacy"}
+
+
+@pytest.mark.asyncio
+async def test_as_of_overfetches_db_limit():
+    # codex F2: with as_of set, the DB is queried with an over-fetched limit so
+    # the window post-filter has a larger candidate pool than the caller's limit.
+    db = _SearchDB([_windowed("a", "x", valid_from=_T0)])
+    with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
+        await ltm.search_long_term_memories(text="x", limit=5, as_of=_T1)
+    assert db.last_limit > 5
+    assert db.last_limit == min(max(5, 5 * 5), 200)
+
+
+@pytest.mark.asyncio
+async def test_no_as_of_queries_exact_limit():
+    # Default (no as_of) must NOT over-fetch — db limit == caller limit.
+    db = _SearchDB([_windowed("a", "x")])
+    with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
+        await ltm.search_long_term_memories(text="x", limit=5)
+    assert db.last_limit == 5
+
+
+@pytest.mark.asyncio
+async def test_as_of_truncates_overfetched_pool_to_limit():
+    # An over-fetched pool with more valid-at-as_of records than `limit` is
+    # truncated back to `limit` after the window filter (codex F2).
+    db = _SearchDB(
+        [
+            _windowed("v1", "valid 1", valid_from=_T0),
+            _windowed("v2", "valid 2", valid_from=_T0),
+            _windowed("v3", "valid 3", valid_from=_T0),
+        ]
+    )
+    with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
+        res = await ltm.search_long_term_memories(text="valid", limit=2, as_of=_T1)
+    assert len(res.memories) == 2
+    assert res.total == 2
 
 
 @pytest.mark.asyncio

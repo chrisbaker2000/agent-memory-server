@@ -1180,12 +1180,14 @@ _NOISE_META_MEMORY = re.compile(
 # corpus as if they were durable facts (LAB-406). "observes the moon" /
 # "unique-marker-" are the seeded contract-test fixture markers.
 _NOISE_TEST_ARTIFACT = re.compile(
-    r"\bcontract test\b|"
+    # TIGHTENED (codex F1, gateway-half parity): require a noise-context suffix or
+    # a colon so a durable fact merely mentioning testing ("prefers contract test
+    # coverage before deploys") is NOT rejected at the write funnel. unique-marker
+    # anchored to its hex id shape.
+    r"\b(?:contract|smoke|e2e) test(?:\s+(?:marker|fixture|artifact|message|response)|:)|"
     r"\btest artifact\b|"
-    r"\bsmoke test\b|"
-    r"\be2e test\b|"
-    r"\bunique-marker-|"
-    r"\bobserves the moon\b",
+    r"\bunique-marker-[0-9a-f-]{8,}|"
+    r"\bpat observes the moon\b",
     re.IGNORECASE,
 )
 
@@ -1193,12 +1195,14 @@ _NOISE_TEST_ARTIFACT = re.compile(
 # heartbeat check." — operational liveness pings, never durable knowledge.
 _NOISE_HEARTBEAT = re.compile(
     r"\bHEARTBEAT_OK\b|"
+    # Both "heartbeat check" and "reported a heartbeat" only count as noise when
+    # an OPERATIONAL actor precedes them — never a bare medical/family phrase.
+    # "Grant has a heartbeat check with cardiology on Friday" and "The
+    # cardiologist reported a heartbeat during the ultrasound" are durable health
+    # facts, NOT noise (codex F1: over-filtering health facts is corruption here).
+    r"\b(?:gateway|service|server|monitor|agent|fleet|bot|cron|daemon|liveness)\b.{0,40}"
     r"\bheartbeat[ _-]?check\b|"
-    # "reported a heartbeat" only counts as noise when an OPERATIONAL actor
-    # precedes it — never a bare medical phrase. "The cardiologist reported a
-    # heartbeat during the ultrasound" is a durable health fact, NOT noise
-    # (codex F1: over-filtering family/health facts is corruption in this fork).
-    r"\b(?:gateway|service|server|monitor|agent|fleet|bot|cron|daemon|pat)\b.{0,40}"
+    r"\b(?:gateway|service|server|monitor|agent|fleet|bot|cron|daemon|liveness)\b.{0,40}"
     r"\breported\s+(?:a\s+)?heartbeat\b",
     re.IGNORECASE,
 )
@@ -1781,6 +1785,15 @@ async def search_long_term_memories(
     Returns:
         MemoryRecordResults containing matching memories
     """
+    # LAB-405 (codex F2): when as_of is set, the validity-window post-filter can
+    # trim the raw page below `limit`, so over-fetch a bounded multiple from the
+    # DB and truncate back to `limit` AFTER filtering — a valid-at-as_of record
+    # just past the raw `limit` is then still considered, and an all-invalid first
+    # page no longer collapses to total=0. Deep offset pagination under as_of stays
+    # best-effort: a complete fix needs valid_from indexed (a reindex, out of scope
+    # per FORK.md #28); valid_from is store-and-return only.
+    db_limit = limit if as_of is None else min(max(limit, limit * 5), 200)
+
     # If no query text is provided, perform a filter-only listing (no semantic search).
     # This enables patterns like: "return all memories for this user/namespace".
     if not (text or "").strip():
@@ -1800,21 +1813,20 @@ async def search_long_term_memories(
             source_channel=source_channel,
             visibility=visibility,
             stale_after=stale_after,
-            limit=limit,
+            limit=db_limit,
             offset=offset,
         )
         # LAB-405 (codex F2): the filter-only listing path returns BEFORE the
         # vector-path as_of post-filter below, so time-travel recall must be
         # applied here too — otherwise a metadata-only "list all" recall with
-        # as_of would leak future/expired records.
+        # as_of would leak future/expired records. Over-fetched db_limit is
+        # window-filtered then truncated back to `limit`.
         if as_of is not None and listing.memories:
             as_of_ts = as_of.timestamp()
-            before = len(listing.memories)
             listing.memories = [
                 m for m in listing.memories if _within_validity_window(m, as_of_ts)
-            ]
-            if len(listing.memories) != before:
-                listing.total = len(listing.memories)
+            ][:limit]
+            listing.total = len(listing.memories)
         await _observe_recall_egress(
             len(listing.memories), exempt=bypass_recall_filters
         )
@@ -1874,7 +1886,7 @@ async def search_long_term_memories(
         distance_threshold=distance_threshold,
         server_side_recency=server_side_recency,
         recency_params=recency_params,
-        limit=limit,
+        limit=db_limit,
         offset=offset,
     )
 
@@ -1908,7 +1920,7 @@ async def search_long_term_memories(
                 distance_threshold=distance_threshold,
                 server_side_recency=server_side_recency,
                 recency_params=recency_params,
-                limit=limit,
+                limit=db_limit,
                 offset=offset,
             )
     except Exception as e:
@@ -1968,15 +1980,17 @@ async def search_long_term_memories(
     if as_of is not None and results.memories:
         as_of_ts = as_of.timestamp()
         before = len(results.memories)
+        # Window-filter the over-fetched candidate pool (db_limit), then truncate
+        # back to the caller's `limit` (codex F2).
         results.memories = [
             m for m in results.memories if _within_validity_window(m, as_of_ts)
-        ]
+        ][:limit]
         excluded = before - len(results.memories)
         if excluded:
             results.total = len(results.memories)
             logger.debug(
                 f"[search_long_term_memories] as_of={as_of.isoformat()} "
-                f"excluded {excluded} out-of-window record(s)"
+                f"excluded/truncated {excluded} record(s) (db_limit={db_limit})"
             )
     # Supersede-hiding (versioning; ported from wfr-memory-commons). By default,
     # records that have been replaced by a newer version (superseded_by set) are

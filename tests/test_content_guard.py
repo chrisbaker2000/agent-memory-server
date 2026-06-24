@@ -246,16 +246,14 @@ class TestTestArtifactNoise:
 
     def test_contract_test_marker(self):
         assert _is_noise_content(
-            "Contract test unique-marker-abc123: pat observes the moon."
+            "Contract test marker unique-marker-a1b2c3d4e5: pat observes the moon."
         )
 
     def test_contract_test_espresso(self):
         assert _is_noise_content("Contract test: chris likes espresso.")
 
     def test_smoke_test(self):
-        assert _is_noise_content(
-            "Smoke test run completed: gateway answered the canary turn."
-        )
+        assert _is_noise_content("Smoke test fixture stored during the nightly run.")
 
     def test_e2e_test_artifact(self):
         assert _is_noise_content(
@@ -269,6 +267,13 @@ class TestTestArtifactNoise:
         """A genuine preference (no test marker) must NOT be caught."""
         assert not _is_noise_content("Chris likes espresso in the morning.")
 
+    def test_durable_testing_reference_not_noise(self):
+        """A durable fact MENTIONING testing (no noise-context suffix/colon) must
+        NOT be caught at the write funnel (codex F1 gateway-half parity)."""
+        assert not _is_noise_content(
+            "Chris prefers contract test coverage before deploys."
+        )
+
 
 class TestHeartbeatNoise:
     """Verify heartbeat / liveness-check spam (LAB-406) is caught."""
@@ -279,7 +284,7 @@ class TestHeartbeatNoise:
         )
 
     def test_heartbeat_check_phrase(self):
-        assert _is_noise_content("Nightly heartbeat check passed, all green.")
+        assert _is_noise_content("Nightly service heartbeat check passed, all green.")
 
     def test_reported_heartbeat(self):
         assert _is_noise_content("The gateway reported a heartbeat to the monitor.")
@@ -296,6 +301,13 @@ class TestHeartbeatNoise:
         noise (codex F1 — over-filtering health facts is corruption in this fork)."""
         assert not _is_noise_content(
             "The cardiologist reported a heartbeat during the ultrasound."
+        )
+
+    def test_medical_heartbeat_check_not_noise(self):
+        """'heartbeat check' with no operational actor is a medical appointment,
+        not liveness noise (codex F1 round 2)."""
+        assert not _is_noise_content(
+            "Grant has a heartbeat check with cardiology on Friday."
         )
 
 
