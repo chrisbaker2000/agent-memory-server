@@ -24,6 +24,7 @@ from agent_memory_server.filters import (
 from agent_memory_server.models import (
     MemoryRecordResult,
     MemoryRecordResults,
+    SearchRequest,
 )
 
 
@@ -634,6 +635,38 @@ class TestTagFilterNone:
     def test_topics_none_filter(self):
         result = Topics(none=["family"]).to_filter()
         assert str(result) == "(-@topics:{family})"
+
+    @pytest.mark.asyncio
+    async def test_topics_none_does_not_trigger_soft_filter_fallback(self):
+        """A negated filter that returns zero must NOT relax into an unfiltered
+        re-search — that would surface the very records the caller excluded
+        (codex F1 on the LAB-401 PR). A zero-result negation is a legitimate
+        empty set, so the strict (negated) search must be the only call."""
+        from unittest.mock import AsyncMock, patch
+
+        from agent_memory_server import api
+        from agent_memory_server.config import Settings
+
+        zero_results = MemoryRecordResults(memories=[], total=0, next_offset=None)
+        with (
+            patch.object(api, "settings", Settings(long_term_memory=True)),
+            patch.object(
+                api.long_term_memory,
+                "search_long_term_memories",
+                AsyncMock(return_value=zero_results),
+            ) as mock_search,
+        ):
+            result = await api.search_long_term_memory(
+                SearchRequest(text="query", topics=Topics(none=["family"])),
+                background_tasks=AsyncMock(),
+                optimize_query=False,
+                current_user=object(),
+            )
+
+        assert result.total == 0
+        # Exactly one (strict) search — no relaxed fallback call.
+        mock_search.assert_called_once()
+        assert mock_search.call_args.kwargs["topics"].none == ["family"]
 
     def test_none_empty_list_raises(self):
         with pytest.raises(ValueError, match="none cannot be an empty list"):

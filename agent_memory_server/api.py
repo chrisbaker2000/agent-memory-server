@@ -679,9 +679,7 @@ async def create_long_term_memory(
         # (reference-protected) write. OPERATOR → "operator"; AGENT → None (the
         # lowest tier; keeps the field empty for the 99% agent/extraction path).
         memory.trust_level = (
-            TrustLevel.OPERATOR.value
-            if caller_trust is TrustLevel.OPERATOR
-            else None
+            TrustLevel.OPERATOR.value if caller_trust is TrustLevel.OPERATOR else None
         )
 
     # Conflict detection: synchronous search for similar memories before indexing
@@ -783,13 +781,35 @@ async def search_long_term_memory(
     # Soft-filter fallback: if strict filters yield no results, relax filters and
     # inject hints into the query text to guide semantic search.
     try:
-        had_any_strict_filters = any(
-            key in kwargs and kwargs[key] is not None
-            for key in ("topics", "entities", "namespace", "memory_type", "event_date")
+        strict_filter_keys = (
+            "topics",
+            "entities",
+            "namespace",
+            "memory_type",
+            "event_date",
         )
-        if raw_results.total == 0 and had_any_strict_filters:
+        had_any_strict_filters = any(
+            key in kwargs and kwargs[key] is not None for key in strict_filter_keys
+        )
+        # Negative (ne/none) filters EXCLUDE records. Relaxing them in the fallback
+        # would return the very records the caller asked to omit (LAB-401), so a
+        # negated filter must suppress the soft-fallback entirely — a zero-result
+        # negation is a legitimate empty set, not a "filters too strict" miss.
+        has_negative_strict_filter = any(
+            kwargs.get(key) is not None
+            and (
+                getattr(kwargs[key], "ne", None) is not None
+                or getattr(kwargs[key], "none", None) is not None
+            )
+            for key in strict_filter_keys
+        )
+        if (
+            raw_results.total == 0
+            and had_any_strict_filters
+            and not has_negative_strict_filter
+        ):
             fallback_kwargs = dict(kwargs)
-            for key in ("topics", "entities", "namespace", "memory_type", "event_date"):
+            for key in strict_filter_keys:
                 fallback_kwargs.pop(key, None)
 
             def _vals(f):
@@ -1028,9 +1048,7 @@ async def supersede_long_term_memory(
     )
 
     if status == long_term_memory.SUPERSEDE_SELF:
-        raise HTTPException(
-            status_code=400, detail="A memory cannot supersede itself"
-        )
+        raise HTTPException(status_code=400, detail="A memory cannot supersede itself")
     if status == long_term_memory.SUPERSEDE_PROTECTED:
         raise HTTPException(
             status_code=403,
