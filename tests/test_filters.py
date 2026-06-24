@@ -668,6 +668,35 @@ class TestTagFilterNone:
         mock_search.assert_called_once()
         assert mock_search.call_args.kwargs["topics"].none == ["family"]
 
+    @pytest.mark.asyncio
+    async def test_topics_ne_does_not_trigger_soft_filter_fallback(self):
+        """The sibling `ne` (single-value negation) must also suppress the
+        fallback — the api.py guard covers both ne and none (codex F1)."""
+        from unittest.mock import AsyncMock, patch
+
+        from agent_memory_server import api
+        from agent_memory_server.config import Settings
+
+        zero_results = MemoryRecordResults(memories=[], total=0, next_offset=None)
+        with (
+            patch.object(api, "settings", Settings(long_term_memory=True)),
+            patch.object(
+                api.long_term_memory,
+                "search_long_term_memories",
+                AsyncMock(return_value=zero_results),
+            ) as mock_search,
+        ):
+            result = await api.search_long_term_memory(
+                SearchRequest(text="query", topics=Topics(ne="family")),
+                background_tasks=AsyncMock(),
+                optimize_query=False,
+                current_user=object(),
+            )
+
+        assert result.total == 0
+        mock_search.assert_called_once()
+        assert mock_search.call_args.kwargs["topics"].ne == "family"
+
     def test_none_empty_list_raises(self):
         with pytest.raises(ValueError, match="none cannot be an empty list"):
             TagFilter(field="topics", none=[])
