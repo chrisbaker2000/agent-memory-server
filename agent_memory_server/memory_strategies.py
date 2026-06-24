@@ -244,6 +244,18 @@ class DiscreteMemoryStrategy(BaseMemoryStrategy):
 
     For each memory, return a JSON object with the following fields:
     - type: str -- The memory type, either "episodic" or "semantic"
+    - kind: str -- The EPISTEMIC type of the claim. One of:
+        * "fact" -- an objectively-verifiable state of the world (default when unsure).
+          e.g. "Christian Baker is a lightweight rower"
+        * "event" -- a time-anchored occurrence. e.g. "Grant Baker had a therapy appointment on 2026-02-25"
+        * "preference" -- a named person's like/dislike/want. e.g. "Chris prefers espresso"
+        * "opinion" -- a named person's subjective evaluative stance about something external.
+          e.g. "Christian thinks rowing is boring"
+        * "belief" -- a named person's contestable conviction about how the world is.
+          e.g. "Chris believes the QNAP is unreliable"
+      Prefer "fact" for verifiable statements even about other people. Use "opinion"/"belief"
+      only when the text carries an evaluative/conviction verb (thinks/feels/believes/suspects)
+      tied to a holder. "preference" outranks "opinion" for the holder's own taste.
     - text: str -- The actual information to store (with all contextual references grounded)
     - topics: list[str] -- The topics of the memory (top {top_k_topics})
     - entities: list[str] -- The entities of the memory
@@ -253,12 +265,14 @@ class DiscreteMemoryStrategy(BaseMemoryStrategy):
         "memories": [
             {{
                 "type": "semantic",
+                "kind": "preference",
                 "text": "{user_name} prefers window seats",
                 "topics": ["travel", "airline"],
                 "entities": ["{user_name}", "window seat"],
             }},
             {{
                 "type": "episodic",
+                "kind": "fact",
                 "text": "Trek discontinued the Trek 520 steel touring bike in 2023",
                 "topics": ["travel", "bicycle"],
                 "entities": ["Trek", "Trek 520 steel touring bike"],
@@ -370,6 +384,7 @@ class SummaryMemoryStrategy(BaseMemoryStrategy):
 
     Return a JSON object with:
     - type: Always "semantic" for summaries
+    - kind: Always "summary" for summaries
     - text: The summary text
     - topics: List of main topics covered
     - entities: List of entities mentioned
@@ -379,6 +394,7 @@ class SummaryMemoryStrategy(BaseMemoryStrategy):
         "memories": [
             {{
                 "type": "semantic",
+                "kind": "summary",
                 "text": "{user_name} discussed project requirements for new website. Decided to use React and PostgreSQL. {user_name} prefers dark theme and mobile-first design. Launch target is March 2025.",
                 "topics": ["project", "website", "technology", "design"],
                 "entities": ["{user_name}", "React", "PostgreSQL", "website", "March 2025"]
@@ -463,6 +479,7 @@ class UserPreferencesMemoryStrategy(BaseMemoryStrategy):
 
     For each preference, return a JSON object with:
     - type: Always "semantic" for preferences
+    - kind: Always "preference" for preferences
     - text: The preference statement
     - topics: List of relevant topics
     - entities: List of entities mentioned
@@ -472,12 +489,14 @@ class UserPreferencesMemoryStrategy(BaseMemoryStrategy):
         "memories": [
             {{
                 "type": "semantic",
+                "kind": "preference",
                 "text": "{user_name} prefers email notifications over SMS",
                 "topics": ["preferences", "communication", "notifications"],
                 "entities": ["{user_name}", "email", "SMS"]
             }},
             {{
                 "type": "semantic",
+                "kind": "preference",
                 "text": "{user_name} works best in the morning and prefers async communication",
                 "topics": ["work_patterns", "communication", "schedule"],
                 "entities": ["{user_name}", "morning", "async communication"]

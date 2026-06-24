@@ -16,7 +16,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import agent_memory_server.long_term_memory as ltm
+from agent_memory_server.config import settings
+from agent_memory_server.extraction import (
+    VALID_MEMORY_KINDS,
+    coerce_extracted_kind,
+)
 from agent_memory_server.filters import Kind, MinConfidence
+from agent_memory_server.memory_strategies import DiscreteMemoryStrategy
 from agent_memory_server.memory_vector_db import (
     CONFIDENCE_UNSCORED_SENTINEL,
     VALID_TO_SENTINEL,
@@ -252,10 +258,12 @@ def _result(id_, text, superseded_by=None):
 
 @pytest.mark.asyncio
 async def test_recall_hides_superseded_by_default():
-    db = _SearchDB([
-        _result("a", "current fact"),
-        _result("b", "old fact", superseded_by="a"),
-    ])
+    db = _SearchDB(
+        [
+            _result("a", "current fact"),
+            _result("b", "old fact", superseded_by="a"),
+        ]
+    )
     with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
         res = await ltm.search_long_term_memories(text="fact", limit=10)
     ids = {m.id for m in res.memories}
@@ -265,10 +273,12 @@ async def test_recall_hides_superseded_by_default():
 
 @pytest.mark.asyncio
 async def test_recall_include_superseded_surfaces_all():
-    db = _SearchDB([
-        _result("a", "current fact"),
-        _result("b", "old fact", superseded_by="a"),
-    ])
+    db = _SearchDB(
+        [
+            _result("a", "current fact"),
+            _result("b", "old fact", superseded_by="a"),
+        ]
+    )
     with patch.object(ltm, "get_memory_vector_db", AsyncMock(return_value=db)):
         res = await ltm.search_long_term_memories(
             text="fact", limit=10, include_superseded=True
@@ -362,3 +372,84 @@ async def test_supersede_force_overrides_conflict():
         status, rec = await ltm.supersede_memory("t", "r", force=True)
     assert status == ltm.SUPERSEDE_OK
     assert rec.superseded_by == "r"
+
+
+# --- LAB-397: populate kind/confidence on extraction -----------------------
+# F0 (LAB-395) extended `kind` with epistemic opinion/belief and set extraction
+# confidence to the model-paraphrase tier (0.7), distinct from first-hand
+# (unscored) writes. These lock the schema + the extraction-stamping convention.
+
+
+def test_kind_literal_accepts_epistemic_values():
+    # The F0-added epistemic kinds must be accepted on MemoryRecord.
+    assert (
+        MemoryRecord(
+            id="o", text="Christian thinks rowing is boring", kind="opinion"
+        ).kind
+        == "opinion"
+    )
+    assert (
+        MemoryRecord(
+            id="b", text="Chris believes the QNAP is unreliable", kind="belief"
+        ).kind
+        == "belief"
+    )
+    # And the original four still work.
+    for k in ("fact", "event", "preference", "summary"):
+        assert MemoryRecord(id=k, text="t", kind=k).kind == k
+
+
+def test_valid_memory_kinds_matches_literal():
+    # The coercion allowlist must stay in lockstep with the model Literal.
+    assert {
+        "fact",
+        "event",
+        "preference",
+        "opinion",
+        "belief",
+        "summary",
+    } == VALID_MEMORY_KINDS
+
+
+def test_coerce_extracted_kind():
+    assert coerce_extracted_kind("opinion") == "opinion"
+    assert coerce_extracted_kind("belief") == "belief"
+    assert coerce_extracted_kind("fact") == "fact"
+    # Off-vocabulary / missing / wrong-type → None (read path treats None as 'fact').
+    assert coerce_extracted_kind("bogus") is None
+    assert coerce_extracted_kind(None) is None
+    assert coerce_extracted_kind(123) is None
+    assert coerce_extracted_kind("") is None
+
+
+def test_extraction_confidence_default_is_scored():
+    # Extraction is a model paraphrase → SCORED (not the unscored first-hand tier).
+    assert settings.extraction_confidence == 0.7
+    assert 0.0 < settings.extraction_confidence < 1.0
+
+
+def test_opinion_record_serializes_kind_tag_and_scored_confidence():
+    # An extracted opinion (kind=opinion, confidence=0.7) must serialize a real
+    # confidence_idx (NOT the unscored sentinel) and the kind TAG — so a
+    # min_confidence floor and an @kind:{opinion} filter both work on it.
+    db = _db()
+    m = MemoryRecord(
+        id="op1",
+        text="Christian thinks rowing is boring",
+        kind="opinion",
+        confidence=settings.extraction_confidence,
+    )
+    data = db._memory_to_data(m)
+    assert data["kind"] == "opinion"
+    assert data["confidence_idx"] == 0.7
+    assert data["confidence_idx"] != CONFIDENCE_UNSCORED_SENTINEL
+
+
+def test_discrete_prompt_emits_kind():
+    # The discrete extraction prompt must instruct the LLM to classify `kind`
+    # (with the epistemic values) and carry it in the example objects, else the
+    # live path would never populate the field.
+    p = DiscreteMemoryStrategy.EXTRACTION_PROMPT
+    assert "kind: str" in p
+    assert '"opinion"' in p and '"belief"' in p
+    assert '"kind": "preference"' in p  # example object carries kind

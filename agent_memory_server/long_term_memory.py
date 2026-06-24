@@ -17,6 +17,7 @@ from agent_memory_server.dependencies import get_background_tasks
 from agent_memory_server.extraction import (
     _resolve_parent_attribution,
     clean_entities,
+    coerce_extracted_kind,
     enforce_topics,
     extract_memories_with_strategy,
     handle_extraction,
@@ -575,6 +576,11 @@ async def extract_memories_from_session_thread(
                 id=str(ULID()),
                 text=memory_data["text"],
                 memory_type=memory_data.get("type", "semantic"),
+                # F0 (LAB-395/LAB-397): epistemic kind from the extractor (coerced;
+                # off-vocab/missing → None = 'fact') + the model-paraphrase
+                # confidence tier (distinct from unscored first-hand writes).
+                kind=coerce_extracted_kind(memory_data.get("kind")),
+                confidence=settings.extraction_confidence,
                 topics=memory_data.get("topics", []),
                 entities=memory_data.get("entities", []),
                 session_id=session_id,

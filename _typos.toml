@@ -5,6 +5,8 @@ aadd = "aadd"
 nclude = "nclude"
 # Hyphenated "mis-attribution"/"mis-attributed" prefix (subject-attribution code) - not a typo
 mis = "mis"
+# Accepted spelling variant in long_term_memory.py prose - not a typo
+unparseable = "unparseable"
 
 [files]
 extend-exclude = ["tests/fixtures/"]

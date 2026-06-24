@@ -26,6 +26,23 @@ logger = get_logger(__name__)
 # Set tokenizer parallelism environment variable
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
+# Valid epistemic `kind` values (MEMORY-MODEL.md / LAB-395). Keep in lockstep with
+# the MemoryRecord.kind Literal in models.py.
+VALID_MEMORY_KINDS = frozenset(
+    {"fact", "event", "preference", "opinion", "belief", "summary"}
+)
+
+
+def coerce_extracted_kind(value: object) -> str | None:
+    """Coerce an LLM-emitted `kind` to a valid MemoryKind, else None.
+
+    An off-vocabulary or missing `kind` becomes None — which the read path treats
+    as ``fact`` — so a stray extraction value can never raise on MemoryRecord
+    construction (the Literal would reject it) nor silently mislabel.
+    """
+    return value if value in VALID_MEMORY_KINDS else None
+
+
 # ============================================================================
 # Vocabulary loading — path configured via settings.vocabulary_path.
 # Falls back to inline defaults if the config file is missing (e.g. in tests).
@@ -48,7 +65,11 @@ def _load_vocabulary() -> dict:
             vocab = json.load(f)
 
             # Auto-convert structured format → flat format
-            if "topics" in vocab and isinstance(vocab["topics"], dict) and "controlled_topics" not in vocab:
+            if (
+                "topics" in vocab
+                and isinstance(vocab["topics"], dict)
+                and "controlled_topics" not in vocab
+            ):
                 topics_dict = vocab["topics"]
                 controlled = list(topics_dict.keys())
                 topic_map: dict[str, str] = {}
@@ -229,18 +250,110 @@ def resolve_user_from_session_id(session_id: str | None) -> str | None:
 
 
 # Entity quality constants — loaded from shared config
-ENTITY_STOP_WORDS: set[str] = set(_vocab.get("entity_stop_words", [
-    "the", "this", "that", "a", "an", "it", "is", "are", "was", "were",
-    "be", "been", "being", "have", "has", "had", "do", "does", "did",
-    "will", "would", "could", "should", "may", "might", "can", "shall", "must",
-    "he", "she", "we", "they", "i", "you", "me", "him", "her", "us", "them",
-    "my", "your", "his", "its", "our", "their", "what", "which", "who", "whom",
-    "not", "no", "yes", "all", "each", "every", "both", "few", "more", "most",
-    "other", "some", "such", "only", "own", "same", "than", "too", "very",
-    "just", "also", "but", "or", "and", "if", "then", "so", "for", "with",
-    "from", "to", "of", "on", "in", "at", "by", "up", "out", "off",
-    "user", "assistant", "system", "none", "null", "true", "false", "ok", "okay",
-]))
+ENTITY_STOP_WORDS: set[str] = set(
+    _vocab.get(
+        "entity_stop_words",
+        [
+            "the",
+            "this",
+            "that",
+            "a",
+            "an",
+            "it",
+            "is",
+            "are",
+            "was",
+            "were",
+            "be",
+            "been",
+            "being",
+            "have",
+            "has",
+            "had",
+            "do",
+            "does",
+            "did",
+            "will",
+            "would",
+            "could",
+            "should",
+            "may",
+            "might",
+            "can",
+            "shall",
+            "must",
+            "he",
+            "she",
+            "we",
+            "they",
+            "i",
+            "you",
+            "me",
+            "him",
+            "her",
+            "us",
+            "them",
+            "my",
+            "your",
+            "his",
+            "its",
+            "our",
+            "their",
+            "what",
+            "which",
+            "who",
+            "whom",
+            "not",
+            "no",
+            "yes",
+            "all",
+            "each",
+            "every",
+            "both",
+            "few",
+            "more",
+            "most",
+            "other",
+            "some",
+            "such",
+            "only",
+            "own",
+            "same",
+            "than",
+            "too",
+            "very",
+            "just",
+            "also",
+            "but",
+            "or",
+            "and",
+            "if",
+            "then",
+            "so",
+            "for",
+            "with",
+            "from",
+            "to",
+            "of",
+            "on",
+            "in",
+            "at",
+            "by",
+            "up",
+            "out",
+            "off",
+            "user",
+            "assistant",
+            "system",
+            "none",
+            "null",
+            "true",
+            "false",
+            "ok",
+            "okay",
+        ],
+    )
+)
 
 _limits = _vocab.get("limits", {})
 MAX_ENTITY_COUNT = _limits.get("max_entity_count", 30)
@@ -248,16 +361,37 @@ MAX_ENTITY_COUNT = _limits.get("max_entity_count", 30)
 # Controlled topic vocabulary — loaded from shared config.
 # Stored as a set for O(1) lookup, with a sorted list for deterministic
 # iteration in substring matching (set iteration order is non-deterministic).
-CONTROLLED_TOPICS: set[str] = set(_vocab.get("controlled_topics", [
-    "family", "health", "education", "heritage",
-    "home", "food", "travel", "entertainment", "sports", "media", "collecting",
-    "work", "finances",
-    "openclaw", "infrastructure", "analytics",
-    "communication", "documents", "security",
-]))
+CONTROLLED_TOPICS: set[str] = set(
+    _vocab.get(
+        "controlled_topics",
+        [
+            "family",
+            "health",
+            "education",
+            "heritage",
+            "home",
+            "food",
+            "travel",
+            "entertainment",
+            "sports",
+            "media",
+            "collecting",
+            "work",
+            "finances",
+            "openclaw",
+            "infrastructure",
+            "analytics",
+            "communication",
+            "documents",
+            "security",
+        ],
+    )
+)
 # Sort longest-first so "infrastructure" matches before "infra" substring,
 # and deterministic across Python restarts (sets have non-deterministic order).
-CONTROLLED_TOPICS_SORTED: list[str] = sorted(CONTROLLED_TOPICS, key=lambda t: (-len(t), t))
+CONTROLLED_TOPICS_SORTED: list[str] = sorted(
+    CONTROLLED_TOPICS, key=lambda t: (-len(t), t)
+)
 
 # Map common off-vocabulary terms to controlled topics (or None to drop)
 _raw_topic_map = _vocab.get("topic_map", {})
@@ -402,7 +536,9 @@ Example: {{"entities": ["John Smith", "Apple Inc.", "New York"]}}
                     raise ValueError("LLM returned empty entities list")
     except Exception:
         # All retries exhausted — return whatever we have (likely [])
-        logger.warning("Entity extraction failed after 3 attempts for text: %s...", text[:80])
+        logger.warning(
+            "Entity extraction failed after 3 attempts for text: %s...", text[:80]
+        )
 
     return list(set(entities))  # Remove duplicates
 
@@ -445,7 +581,9 @@ Example: {{"topics": ["machine learning", "data science", "python"]}}
                 topics = topics[:_num_topics]
     except Exception:
         # All retries exhausted — return whatever we have (likely [])
-        logger.warning("Topic extraction failed after 3 attempts for text: %s...", text[:80])
+        logger.warning(
+            "Topic extraction failed after 3 attempts for text: %s...", text[:80]
+        )
 
     return topics
 
@@ -471,7 +609,7 @@ def clean_entities(entities: list[str]) -> list[str]:
     for entity in entities:
         if not isinstance(entity, str):
             continue
-        entity = entity.strip().strip('"\'[]{}')
+        entity = entity.strip().strip("\"'[]{}")
         if not entity:
             continue
 
@@ -480,15 +618,15 @@ def clean_entities(entities: list[str]) -> list[str]:
             continue
 
         # Skip file paths (starting with / or ~/ or ./)
-        if re.match(r'^[~/.]/', entity):
+        if re.match(r"^[~/.]/", entity):
             continue
 
         # Skip hex IDs (>= 16 hex chars)
-        if re.match(r'^[0-9A-Fa-f]{16,}$', entity):
+        if re.match(r"^[0-9A-Fa-f]{16,}$", entity):
             continue
 
         # Skip chmod-style permissions (e.g., "0600")
-        if re.match(r'^0[0-7]{3}$', entity):
+        if re.match(r"^0[0-7]{3}$", entity):
             continue
 
         # Strip @ and # prefixes
@@ -608,7 +746,7 @@ def enforce_topics(topics: list[str]) -> list[str]:
         # Use regex \b to prevent "ai" matching inside "email" or "maintain".
         matched = False
         for ct in CONTROLLED_TOPICS_SORTED:
-            if re.search(r'(?:^|[\s_\-/])' + re.escape(ct) + r'(?:$|[\s_\-/])', topic):
+            if re.search(r"(?:^|[\s_\-/])" + re.escape(ct) + r"(?:$|[\s_\-/])", topic):
                 if ct not in seen:
                     seen.add(ct)
                     cleaned.append(ct)
@@ -618,8 +756,13 @@ def enforce_topics(topics: list[str]) -> list[str]:
         if not matched:
             # Try word-boundary match against topic map keys
             for map_key, map_val in TOPIC_MAP.items():
-                if map_key and map_val is not None and re.search(
-                    r'(?:^|[\s_\-/])' + re.escape(map_key) + r'(?:$|[\s_\-/])', topic
+                if (
+                    map_key
+                    and map_val is not None
+                    and re.search(
+                        r"(?:^|[\s_\-/])" + re.escape(map_key) + r"(?:$|[\s_\-/])",
+                        topic,
+                    )
                 ):
                     if map_val not in seen:
                         seen.add(map_val)
@@ -906,6 +1049,12 @@ async def extract_memories_with_strategy(
                 id=str(ulid.ULID()),
                 text=new_memory["text"],
                 memory_type=new_memory.get("type", "episodic"),
+                # F0 (LAB-395/LAB-397): epistemic kind from the extractor (coerced
+                # to the valid set; off-vocab/missing → None = read as 'fact'), and
+                # confidence stamped for the model-paraphrase tier (distinct from a
+                # first-hand memory_store write, which stays unscored).
+                kind=coerce_extracted_kind(new_memory.get("kind")),
+                confidence=settings.extraction_confidence,
                 topics=enforce_topics(new_memory.get("topics", [])),
                 entities=clean_entities(new_memory.get("entities", [])),
                 discrete_memory_extracted="t",

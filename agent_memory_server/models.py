@@ -350,7 +350,9 @@ class MemoryRecord(BaseModel):
         description="Datetime after which this memory should be considered stale",
     )
     # --- Provenance & versioning (ported from wfr-memory-commons / further-memory) ---
-    kind: Literal["fact", "event", "preference", "summary"] | None = Field(
+    kind: (
+        Literal["fact", "event", "preference", "opinion", "belief", "summary"] | None
+    ) = Field(
         default=None,
         description=(
             "Memory kind. Recall FILTER only — does not affect dedup or ranking. "
@@ -1081,9 +1083,9 @@ class EditMemoryRecordRequest(BaseModel):
     stale_after: datetime | None = Field(
         default=None, description="Updated stale-after datetime for the memory"
     )
-    kind: Literal["fact", "event", "preference", "summary"] | None = Field(
-        default=None, description="Updated memory kind"
-    )
+    kind: (
+        Literal["fact", "event", "preference", "opinion", "belief", "summary"] | None
+    ) = Field(default=None, description="Updated memory kind")
     confidence: float | None = Field(
         default=None, ge=0.0, le=1.0, description="Updated confidence score [0, 1]"
     )
