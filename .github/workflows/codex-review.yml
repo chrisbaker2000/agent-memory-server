@@ -325,7 +325,7 @@ jobs:
                         + "**Issue:** " + .issue + "\n\n"
                         + "**Why:** " + .why + "\n\n"
                         + (if .fix_diff and .fix_diff != ""
-                            then "**Suggested fix:**\n```diff\n" + .fix_diff + "\n```\n\n"
+                            then "**Suggested fix:**\n````diff\n" + .fix_diff + "\n````\n\n"
                             else "_(structural change — no patch)_\n\n"
                           end)
                         + (if .refs and (.refs | length) > 0
