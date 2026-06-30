@@ -19,7 +19,9 @@ import agent_memory_server.long_term_memory as ltm
 from agent_memory_server.config import settings
 from agent_memory_server.extraction import (
     VALID_MEMORY_KINDS,
+    VALID_MEMORY_TYPES,
     coerce_extracted_kind,
+    coerce_memory_type,
 )
 from agent_memory_server.filters import Kind, MinConfidence
 from agent_memory_server.memory_strategies import DiscreteMemoryStrategy
@@ -709,6 +711,36 @@ def test_coerce_extracted_kind():
     assert coerce_extracted_kind("  Belief  ") == "belief"
 
 
+def test_valid_memory_types_matches_enum():
+    # The coercion allowlist must stay in lockstep with MemoryTypeEnum.
+    assert {"episodic", "semantic", "message"} == VALID_MEMORY_TYPES
+
+
+def test_coerce_memory_type():
+    # Valid enum values pass through unchanged.
+    assert coerce_memory_type("episodic") == "episodic"
+    assert coerce_memory_type("semantic") == "semantic"
+    assert coerce_memory_type("message") == "message"
+    # LAB-487: the live off-enum value ("epistemic") coerces to the default
+    # instead of raising ValidationError and nuking the extraction batch.
+    assert coerce_memory_type("epistemic") == "episodic"
+    # Other off-vocab / missing / wrong-type → default (NEVER None — memory_type
+    # has no None sentinel, so the field always gets a valid enum value).
+    assert coerce_memory_type("bogus") == "episodic"
+    assert coerce_memory_type(None) == "episodic"
+    assert coerce_memory_type(123) == "episodic"
+    assert coerce_memory_type("") == "episodic"
+    # Unhashable LLM output must NOT raise (a bare `in frozenset` would TypeError).
+    assert coerce_memory_type(["semantic"]) == "episodic"
+    assert coerce_memory_type({"type": "semantic"}) == "episodic"
+    # Capitalized/padded emissions normalize to the canonical lowercase value.
+    assert coerce_memory_type("Semantic") == "semantic"
+    assert coerce_memory_type("MESSAGE ") == "message"
+    assert coerce_memory_type("  Episodic  ") == "episodic"
+    # An explicit default is honored (callers may prefer a different fallback).
+    assert coerce_memory_type("bogus", default="semantic") == "semantic"
+
+
 def test_extraction_confidence_default_is_scored():
     # Extraction is a model paraphrase → SCORED (not the unscored first-hand tier).
     assert settings.extraction_confidence == 0.7
@@ -865,6 +897,118 @@ async def test_strategy_aware_extraction_stamps_kind_and_confidence():
     assert len(captured) == 1
     assert captured[0].kind == "summary"  # invariant strategy default applied
     assert captured[0].confidence == settings.extraction_confidence
+
+
+@pytest.mark.asyncio
+async def test_strategy_aware_extraction_survives_off_enum_memory_type():
+    """LAB-487 regression: one extracted dict with an off-enum memory_type
+    ('epistemic', observed live) must NOT abort the whole batch. The bad record's
+    type coerces to the default and ALL records — good and coerced — still index.
+    Before the fix, the list-comprehension construction raised ValidationError on
+    the bad record and silently dropped every fact from the conversation."""
+    import agent_memory_server.extraction as ext
+
+    captured: list = []
+
+    async def _capture_index(memories, **kwargs):
+        captured.extend(memories)
+
+    class _Strategy:
+        async def extract_memories(self, text, source_user_name=None):
+            return [
+                {"text": "Chris has a house on Beech Island", "type": "semantic"},
+                # The exact off-enum value from memory-server.err.log.1.
+                {"text": "Bow Lake is in Strafford NH", "type": "epistemic"},
+                {"text": "valid episodic fact", "type": "episodic"},
+            ]
+
+    fake_db = MagicMock()
+    fake_db.update_memories = AsyncMock(return_value=1)
+
+    parent = MemoryRecord(
+        id="msg-487",
+        text="a conversation about New Hampshire",
+        memory_type="message",
+        extraction_strategy="discrete",
+        extraction_strategy_config={},
+        discrete_memory_extracted="f",
+    )
+
+    with (
+        patch(
+            "agent_memory_server.memory_vector_db_factory.get_memory_vector_db",
+            AsyncMock(return_value=fake_db),
+        ),
+        patch(
+            "agent_memory_server.memory_strategies.get_memory_strategy",
+            return_value=_Strategy(),
+        ),
+        patch(
+            "agent_memory_server.long_term_memory.index_long_term_memories",
+            _capture_index,
+        ),
+    ):
+        await ext.extract_memories_with_strategy(memories=[parent], deduplicate=False)
+
+    # All three survive — the off-enum record is coerced, not dropped.
+    assert len(captured) == 3
+    by_text = {r.text: r for r in captured}
+    assert by_text["Chris has a house on Beech Island"].memory_type == "semantic"
+    assert by_text["valid episodic fact"].memory_type == "episodic"
+    # The 'epistemic' record persisted with its type coerced to the default.
+    assert by_text["Bow Lake is in Strafford NH"].memory_type == "episodic"
+
+
+@pytest.mark.asyncio
+async def test_strategy_aware_extraction_skips_only_the_unconstructable_record():
+    """A record missing the required ``text`` field can't be constructed; the
+    per-record guard (LAB-487) must skip ONLY it and still index the rest."""
+    import agent_memory_server.extraction as ext
+
+    captured: list = []
+
+    async def _capture_index(memories, **kwargs):
+        captured.extend(memories)
+
+    class _Strategy:
+        async def extract_memories(self, text, source_user_name=None):
+            return [
+                {"text": "good fact one", "type": "semantic"},
+                {"type": "semantic"},  # no "text" → KeyError on construction
+                {"text": "good fact two", "type": "semantic"},
+            ]
+
+    fake_db = MagicMock()
+    fake_db.update_memories = AsyncMock(return_value=1)
+
+    parent = MemoryRecord(
+        id="msg-487b",
+        text="another conversation",
+        memory_type="message",
+        extraction_strategy="discrete",
+        extraction_strategy_config={},
+        discrete_memory_extracted="f",
+    )
+
+    with (
+        patch(
+            "agent_memory_server.memory_vector_db_factory.get_memory_vector_db",
+            AsyncMock(return_value=fake_db),
+        ),
+        patch(
+            "agent_memory_server.memory_strategies.get_memory_strategy",
+            return_value=_Strategy(),
+        ),
+        patch(
+            "agent_memory_server.long_term_memory.index_long_term_memories",
+            _capture_index,
+        ),
+    ):
+        await ext.extract_memories_with_strategy(memories=[parent], deduplicate=False)
+
+    # Only the two well-formed records index; the text-less one is skipped.
+    assert len(captured) == 2
+    assert {r.text for r in captured} == {"good fact one", "good fact two"}
 
 
 def test_default_kind_for_strategy():

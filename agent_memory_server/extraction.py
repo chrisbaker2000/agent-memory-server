@@ -14,7 +14,7 @@ from agent_memory_server.config import settings
 from agent_memory_server.filters import DiscreteMemoryExtracted, MemoryType
 from agent_memory_server.llm import LLMClient
 from agent_memory_server.logging import get_logger
-from agent_memory_server.models import VISIBILITY_RANK, MemoryRecord
+from agent_memory_server.models import VISIBILITY_RANK, MemoryRecord, MemoryTypeEnum
 
 
 if TYPE_CHECKING:
@@ -60,6 +60,34 @@ def coerce_extracted_kind(value: object) -> str | None:
         return None
     normalized = value.strip().lower()
     return normalized if normalized in VALID_MEMORY_KINDS else None
+
+
+# Valid `memory_type` values, kept in lockstep with MemoryTypeEnum in models.py.
+VALID_MEMORY_TYPES = frozenset(e.value for e in MemoryTypeEnum)
+
+# The established default for discrete-extracted memories (matches the historical
+# `new_memory.get("type", "episodic")` at the construction site below).
+_DEFAULT_MEMORY_TYPE = "episodic"
+
+
+def coerce_memory_type(value: object, default: str = _DEFAULT_MEMORY_TYPE) -> str:
+    """Coerce an LLM-emitted ``memory_type`` to a valid MemoryTypeEnum value.
+
+    An off-enum (e.g. the live ``"epistemic"`` from LAB-487), missing, wrong-type,
+    OR unhashable ``memory_type`` becomes ``default`` instead of raising a pydantic
+    ``ValidationError`` on MemoryRecord construction — which, in the batched
+    extraction below, would abort EVERY record in the batch, not just the bad one.
+    This mirrors :func:`coerce_extracted_kind` for the sibling ``kind`` field; the
+    ``isinstance(value, str)`` guard is load-bearing (a bare ``in`` membership test
+    raises ``TypeError`` on an unhashable emission like ``["semantic"]``). The value
+    is normalized (strip + lowercase) so ``"Episodic"`` / ``"SEMANTIC "`` map to
+    canonical form. Unlike ``coerce_extracted_kind`` (None → read as ``fact``),
+    ``memory_type`` has no None sentinel, so this always returns a valid enum value.
+    """
+    if not isinstance(value, str):
+        return default
+    normalized = value.strip().lower()
+    return normalized if normalized in VALID_MEMORY_TYPES else default
 
 
 # ============================================================================
@@ -1062,37 +1090,54 @@ async def extract_memories_with_strategy(
     if all_updated_memories:
         await db.update_memories(all_updated_memories)
 
-    # Index new extracted memories
+    # Index new extracted memories.
+    # LAB-487: build each record under its OWN try/except. A single malformed
+    # extracted dict (e.g. an off-enum memory_type, or a missing required "text")
+    # must skip ONLY that record — the historical list comprehension let one
+    # ValidationError abort the whole batch, silently dropping every other fact
+    # extracted from the same conversation thread.
     if all_new_memories:
-        long_term_memories = [
-            MemoryRecord(
-                id=str(ulid.ULID()),
-                text=new_memory["text"],
-                memory_type=new_memory.get("type", "episodic"),
-                # F0 (LAB-395/LAB-397): a strategy with an INVARIANT kind
-                # (summary→summary, preferences→preference) is AUTHORITATIVE — it
-                # overrides whatever the LLM emitted (a summary is always a summary,
-                # even if the model labels it "fact"). Discrete has no invariant
-                # (default None), so it falls through to the coerced LLM kind;
-                # off-vocab/missing → None = read as 'fact'. Confidence is the
-                # model-paraphrase tier (distinct from an unscored first-hand
-                # memory_store write).
-                kind=default_kind_for_strategy(new_memory.get("_strategy"))
-                or coerce_extracted_kind(new_memory.get("kind")),
-                confidence=settings.extraction_confidence,
-                topics=enforce_topics(new_memory.get("topics", [])),
-                entities=clean_entities(new_memory.get("entities", [])),
-                discrete_memory_extracted="t",
-                extraction_strategy="discrete",  # These are already extracted
-                extraction_strategy_config={},
-                source_user=new_memory.get("_source_user"),
-                source_channel=new_memory.get("_source_channel"),
-                visibility=new_memory.get("_visibility", "everyone"),
-            )
-            for new_memory in all_new_memories
-        ]
+        long_term_memories: list[MemoryRecord] = []
+        for new_memory in all_new_memories:
+            try:
+                long_term_memories.append(
+                    MemoryRecord(
+                        id=str(ulid.ULID()),
+                        text=new_memory["text"],
+                        memory_type=coerce_memory_type(new_memory.get("type")),
+                        # F0 (LAB-395/LAB-397): a strategy with an INVARIANT kind
+                        # (summary→summary, preferences→preference) is AUTHORITATIVE —
+                        # it overrides whatever the LLM emitted (a summary is always a
+                        # summary, even if the model labels it "fact"). Discrete has no
+                        # invariant (default None), so it falls through to the coerced
+                        # LLM kind; off-vocab/missing → None = read as 'fact'.
+                        # Confidence is the model-paraphrase tier (distinct from an
+                        # unscored first-hand memory_store write).
+                        kind=default_kind_for_strategy(new_memory.get("_strategy"))
+                        or coerce_extracted_kind(new_memory.get("kind")),
+                        confidence=settings.extraction_confidence,
+                        topics=enforce_topics(new_memory.get("topics", [])),
+                        entities=clean_entities(new_memory.get("entities", [])),
+                        discrete_memory_extracted="t",
+                        extraction_strategy="discrete",  # These are already extracted
+                        extraction_strategy_config={},
+                        source_user=new_memory.get("_source_user"),
+                        source_channel=new_memory.get("_source_channel"),
+                        visibility=new_memory.get("_visibility", "everyone"),
+                    )
+                )
+            except Exception as e:
+                # coerce_memory_type / coerce_extracted_kind already neutralize the
+                # known enum hazards; this guards any residual construction failure
+                # (e.g. a missing "text") so the rest of the batch still persists.
+                logger.warning(
+                    "Skipping malformed extracted memory (text=%r): %s",
+                    str(new_memory.get("text", ""))[:80],
+                    e,
+                )
 
-        await index_long_term_memories(
-            long_term_memories,
-            deduplicate=deduplicate,
-        )
+        if long_term_memories:
+            await index_long_term_memories(
+                long_term_memories,
+                deduplicate=deduplicate,
+            )
