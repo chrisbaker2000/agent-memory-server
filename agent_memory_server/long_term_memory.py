@@ -603,9 +603,18 @@ async def extract_memories_from_session_thread(
                     visibility=resolved_visibility,
                 )
             except Exception as e:
+                # memory_data may be non-dict debris (DiscreteMemoryStrategy returns
+                # the raw LLM JSON list unvalidated) — a bare `.get()` here would
+                # raise INSIDE the guard, escape to the outer handler, and drop the
+                # whole thread. Resolve the preview defensively.
+                text_preview = (
+                    str(memory_data.get("text", ""))[:80]
+                    if isinstance(memory_data, dict)
+                    else str(memory_data)[:80]
+                )
                 logger.warning(
                     "Skipping malformed session-thread extracted memory (text=%r): %s",
-                    str(memory_data.get("text", ""))[:80],
+                    text_preview,
                     e,
                 )
                 continue

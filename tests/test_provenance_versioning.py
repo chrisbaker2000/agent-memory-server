@@ -711,21 +711,26 @@ def test_coerce_extracted_kind():
     assert coerce_extracted_kind("  Belief  ") == "belief"
 
 
-def test_valid_memory_types_matches_enum():
-    # The coercion allowlist must stay in lockstep with MemoryTypeEnum.
-    assert {"episodic", "semantic", "message"} == VALID_MEMORY_TYPES
+def test_valid_memory_types_are_extractable_types():
+    # Extraction may only create derived semantic/episodic facts; "message" is
+    # reserved for raw conversation-message records and is deliberately excluded.
+    assert {"episodic", "semantic"} == VALID_MEMORY_TYPES
 
 
 def test_coerce_memory_type():
-    # Valid enum values pass through unchanged.
+    # Valid extractable types pass through unchanged.
     assert coerce_memory_type("episodic") == "episodic"
     assert coerce_memory_type("semantic") == "semantic"
-    assert coerce_memory_type("message") == "message"
+    # "message" is a valid enum value but NOT a valid EXTRACTED type — it must
+    # coerce to the default, never be preserved (codex F1: an extracted fact typed
+    # "message" + a stamped session_id would pollute message-only reconstruction).
+    assert coerce_memory_type("message") == "episodic"
+    assert coerce_memory_type("MESSAGE ") == "episodic"
     # LAB-487: the live off-enum value ("epistemic") coerces to the default
     # instead of raising ValidationError and nuking the extraction batch.
     assert coerce_memory_type("epistemic") == "episodic"
     # Other off-vocab / missing / wrong-type → default (NEVER None — memory_type
-    # has no None sentinel, so the field always gets a valid enum value).
+    # has no None sentinel, so the field always gets a valid type).
     assert coerce_memory_type("bogus") == "episodic"
     assert coerce_memory_type(None) == "episodic"
     assert coerce_memory_type(123) == "episodic"
@@ -735,10 +740,11 @@ def test_coerce_memory_type():
     assert coerce_memory_type({"type": "semantic"}) == "episodic"
     # Capitalized/padded emissions normalize to the canonical lowercase value.
     assert coerce_memory_type("Semantic") == "semantic"
-    assert coerce_memory_type("MESSAGE ") == "message"
     assert coerce_memory_type("  Episodic  ") == "episodic"
-    # An explicit default is honored (callers may prefer a different fallback).
+    # An explicit default is honored (callers may prefer a different fallback) —
+    # and "message" coerces to that explicit default too, not to "episodic".
     assert coerce_memory_type("bogus", default="semantic") == "semantic"
+    assert coerce_memory_type("message", default="semantic") == "semantic"
 
 
 def test_extraction_confidence_default_is_scored():
@@ -818,6 +824,10 @@ async def test_session_thread_extraction_stamps_kind_and_confidence():
                 # LAB-487: an off-enum memory_type ("epistemic", observed live)
                 # must coerce — NOT raise and abort the whole thread's batch.
                 {"text": "bad type coerced", "type": "epistemic", "kind": "belief"},
+                # Non-object LLM debris (DiscreteMemoryStrategy returns the raw JSON
+                # list unvalidated) must be skipped without aborting the batch — a
+                # bare `.get()` in the skip-logger would otherwise re-raise (codex F2).
+                "not a memory object",
             ]
 
     with (
@@ -834,8 +844,8 @@ async def test_session_thread_extraction_stamps_kind_and_confidence():
             session_id="test-session", source_user="chris"
         )
 
-    # All four survive — the off-enum-type record is coerced, not dropped, and it
-    # does NOT take the rest of the batch down with it (LAB-487).
+    # All four constructable records survive — the off-enum-type record is coerced
+    # and the non-dict debris is skipped, neither taking the batch down (LAB-487).
     assert len(records) == 4
     # Every extracted record is stamped with the scored extraction-confidence tier.
     assert all(r.confidence == settings.extraction_confidence for r in records)

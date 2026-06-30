@@ -62,8 +62,15 @@ def coerce_extracted_kind(value: object) -> str | None:
     return normalized if normalized in VALID_MEMORY_KINDS else None
 
 
-# Valid `memory_type` values, kept in lockstep with MemoryTypeEnum in models.py.
-VALID_MEMORY_TYPES = frozenset(e.value for e in MemoryTypeEnum)
+# Valid LLM-emitted memory types for EXTRACTED memories. MemoryTypeEnum also
+# includes "message", but that is reserved for raw conversation-message records —
+# an extracted/derived fact must never be typed "message" (the session-thread path
+# also stamps session_id, so a "message"-typed extracted fact would pollute
+# message-only reconstruction/search paths). So "message" is deliberately excluded
+# here and coerces to the call-site default, like any other off-enum value.
+VALID_MEMORY_TYPES = frozenset(
+    {MemoryTypeEnum.EPISODIC.value, MemoryTypeEnum.SEMANTIC.value}
+)
 
 # The established default for discrete-extracted memories (matches the historical
 # `new_memory.get("type", "episodic")` at the construction site below).
@@ -71,10 +78,13 @@ _DEFAULT_MEMORY_TYPE = "episodic"
 
 
 def coerce_memory_type(value: object, default: str = _DEFAULT_MEMORY_TYPE) -> str:
-    """Coerce an LLM-emitted ``memory_type`` to a valid MemoryTypeEnum value.
+    """Coerce an LLM-emitted ``memory_type`` to a valid EXTRACTED memory type.
 
-    An off-enum (e.g. the live ``"epistemic"`` from LAB-487), missing, wrong-type,
-    OR unhashable ``memory_type`` becomes ``default`` instead of raising a pydantic
+    Returns ``value`` only if it is ``"episodic"`` or ``"semantic"`` (the types an
+    extraction can legitimately produce — NOT ``"message"``, which is reserved for
+    raw conversation records, see VALID_MEMORY_TYPES). An off-enum (e.g. the live
+    ``"epistemic"`` from LAB-487), ``"message"``, missing, wrong-type, OR unhashable
+    ``memory_type`` becomes ``default`` instead of raising a pydantic
     ``ValidationError`` on MemoryRecord construction — which, in the batched
     extraction below, would abort EVERY record in the batch, not just the bad one.
     This mirrors :func:`coerce_extracted_kind` for the sibling ``kind`` field; the
@@ -82,7 +92,7 @@ def coerce_memory_type(value: object, default: str = _DEFAULT_MEMORY_TYPE) -> st
     raises ``TypeError`` on an unhashable emission like ``["semantic"]``). The value
     is normalized (strip + lowercase) so ``"Episodic"`` / ``"SEMANTIC "`` map to
     canonical form. Unlike ``coerce_extracted_kind`` (None → read as ``fact``),
-    ``memory_type`` has no None sentinel, so this always returns a valid enum value.
+    ``memory_type`` has no None sentinel, so this always returns a valid type.
     """
     if not isinstance(value, str):
         return default
@@ -1130,9 +1140,16 @@ async def extract_memories_with_strategy(
                 # coerce_memory_type / coerce_extracted_kind already neutralize the
                 # known enum hazards; this guards any residual construction failure
                 # (e.g. a missing "text") so the rest of the batch still persists.
+                # new_memory may be non-dict debris, so resolve the preview
+                # defensively (a bare `.get()` would raise inside this guard).
+                text_preview = (
+                    str(new_memory.get("text", ""))[:80]
+                    if isinstance(new_memory, dict)
+                    else str(new_memory)[:80]
+                )
                 logger.warning(
                     "Skipping malformed extracted memory (text=%r): %s",
-                    str(new_memory.get("text", ""))[:80],
+                    text_preview,
                     e,
                 )
 
