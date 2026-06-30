@@ -993,6 +993,10 @@ async def test_strategy_aware_extraction_skips_only_the_unconstructable_record()
         async def extract_memories(self, text, source_user_name=None):
             return [
                 {"text": "good fact one", "type": "semantic"},
+                # Non-dict debris must be appended untagged (NOT crash the
+                # attribution-tagging loop and lose the parent's siblings — codex F1)
+                # and then skipped at construction.
+                "not a memory object",
                 {"type": "semantic"},  # no "text" → KeyError on construction
                 {"text": "good fact two", "type": "semantic"},
             ]
@@ -1025,7 +1029,8 @@ async def test_strategy_aware_extraction_skips_only_the_unconstructable_record()
     ):
         await ext.extract_memories_with_strategy(memories=[parent], deduplicate=False)
 
-    # Only the two well-formed records index; the text-less one is skipped.
+    # Only the two well-formed records index; the text-less dict AND the non-dict
+    # debris are skipped — neither aborts the parent's batch.
     assert len(captured) == 2
     assert {r.text for r in captured} == {"good fact one", "good fact two"}
 

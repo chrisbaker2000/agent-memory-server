@@ -1071,14 +1071,20 @@ async def extract_memories_with_strategy(
                     )
                 )
 
-                # Tag each extracted dict with parent attribution for later use
+                # Tag each extracted dict with parent attribution for later use.
+                # LAB-487/codex F1: the strategy returns the raw LLM list unvalidated,
+                # so a non-dict debris item (string/list/null) must NOT be subscripted
+                # here — that would raise, the parent's outer except would mark the
+                # parent extracted, and ALL its valid sibling facts would be lost.
+                # Append debris untagged so it reaches the per-record construction
+                # guard below, which skips only that item.
                 for em in extracted_memories:
-                    em["_source_user"] = parent_user
-                    em["_source_channel"] = parent_channel
-                    em["_visibility"] = parent_visibility
-                    em["_strategy"] = strategy_name
-
-                all_new_memories.extend(extracted_memories)
+                    if isinstance(em, dict):
+                        em["_source_user"] = parent_user
+                        em["_source_channel"] = parent_channel
+                        em["_visibility"] = parent_visibility
+                        em["_strategy"] = strategy_name
+                    all_new_memories.append(em)
 
                 # Update the memory to mark it as processed
                 updated_memory = memory.model_copy(
