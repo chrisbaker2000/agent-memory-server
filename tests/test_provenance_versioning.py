@@ -815,6 +815,9 @@ async def test_session_thread_extraction_stamps_kind_and_confidence():
                     "type": "semantic",
                 },  # no kind
                 {"text": "bad kind ignored", "type": "semantic", "kind": "BOGUS"},
+                # LAB-487: an off-enum memory_type ("epistemic", observed live)
+                # must coerce — NOT raise and abort the whole thread's batch.
+                {"text": "bad type coerced", "type": "epistemic", "kind": "belief"},
             ]
 
     with (
@@ -831,13 +834,19 @@ async def test_session_thread_extraction_stamps_kind_and_confidence():
             session_id="test-session", source_user="chris"
         )
 
-    assert len(records) == 3
+    # All four survive — the off-enum-type record is coerced, not dropped, and it
+    # does NOT take the rest of the batch down with it (LAB-487).
+    assert len(records) == 4
     # Every extracted record is stamped with the scored extraction-confidence tier.
     assert all(r.confidence == settings.extraction_confidence for r in records)
     # kind: emitted opinion kept; missing → None (reads as fact); off-vocab → None.
     assert records[0].kind == "opinion"
     assert records[1].kind is None
     assert records[2].kind is None
+    # The off-enum memory_type coerced to this site's default ("semantic"); its
+    # valid kind ("belief") is preserved.
+    assert records[3].memory_type == "semantic"
+    assert records[3].kind == "belief"
 
 
 @pytest.mark.asyncio

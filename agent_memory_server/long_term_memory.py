@@ -18,6 +18,7 @@ from agent_memory_server.extraction import (
     _resolve_parent_attribution,
     clean_entities,
     coerce_extracted_kind,
+    coerce_memory_type,
     enforce_topics,
     extract_memories_with_strategy,
     handle_extraction,
@@ -572,25 +573,42 @@ async def extract_memories_from_session_thread(
         resolved_visibility = visibility if visibility is not None else "everyone"
         extracted_memories = []
         for memory_data in memories_data:
-            memory = MemoryRecord(
-                id=str(ULID()),
-                text=memory_data["text"],
-                memory_type=memory_data.get("type", "semantic"),
-                # F0 (LAB-395/LAB-397): epistemic kind from the extractor (coerced;
-                # off-vocab/missing → None = 'fact') + the model-paraphrase
-                # confidence tier (distinct from unscored first-hand writes).
-                kind=coerce_extracted_kind(memory_data.get("kind")),
-                confidence=settings.extraction_confidence,
-                topics=memory_data.get("topics", []),
-                entities=memory_data.get("entities", []),
-                session_id=session_id,
-                namespace=namespace,
-                user_id=user_id,
-                discrete_memory_extracted="t",  # Mark as extracted
-                source_user=source_user,
-                source_channel=source_channel,
-                visibility=resolved_visibility,
-            )
+            # LAB-487: build each record under its OWN guard. This is the LIVE
+            # auto-capture path; the outer try/except below returns [] on ANY
+            # error, so a single off-enum memory_type (observed live as
+            # "epistemic") would drop EVERY fact extracted from the thread and
+            # the caller would still mark the messages extracted (permanent loss).
+            # coerce_memory_type neutralizes the known enum hazard; the try/except
+            # guards any residual construction failure (e.g. a missing "text").
+            try:
+                memory = MemoryRecord(
+                    id=str(ULID()),
+                    text=memory_data["text"],
+                    memory_type=coerce_memory_type(
+                        memory_data.get("type"), default="semantic"
+                    ),
+                    # F0 (LAB-395/LAB-397): epistemic kind from the extractor (coerced;
+                    # off-vocab/missing → None = 'fact') + the model-paraphrase
+                    # confidence tier (distinct from unscored first-hand writes).
+                    kind=coerce_extracted_kind(memory_data.get("kind")),
+                    confidence=settings.extraction_confidence,
+                    topics=memory_data.get("topics", []),
+                    entities=memory_data.get("entities", []),
+                    session_id=session_id,
+                    namespace=namespace,
+                    user_id=user_id,
+                    discrete_memory_extracted="t",  # Mark as extracted
+                    source_user=source_user,
+                    source_channel=source_channel,
+                    visibility=resolved_visibility,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Skipping malformed session-thread extracted memory (text=%r): %s",
+                    str(memory_data.get("text", ""))[:80],
+                    e,
+                )
+                continue
             extracted_memories.append(memory)
 
         return extracted_memories
