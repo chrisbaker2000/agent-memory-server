@@ -721,30 +721,30 @@ def test_coerce_memory_type():
     # Valid extractable types pass through unchanged.
     assert coerce_memory_type("episodic") == "episodic"
     assert coerce_memory_type("semantic") == "semantic"
-    # "message" is a valid enum value but NOT a valid EXTRACTED type — it must
-    # coerce to the default, never be preserved (codex F1: an extracted fact typed
-    # "message" + a stamped session_id would pollute message-only reconstruction).
-    assert coerce_memory_type("message") == "episodic"
-    assert coerce_memory_type("MESSAGE ") == "episodic"
-    # LAB-487: the live off-enum value ("epistemic") coerces to the default
-    # instead of raising ValidationError and nuking the extraction batch.
+    # "message" is a valid enum value but NOT a valid EXTRACTED type — it must be
+    # coerced, never preserved (codex F1: an extracted fact typed "message" + a
+    # stamped session_id would pollute message-only reconstruction). LAB-533: an
+    # emitted-but-unrecognized value falls back to "semantic" regardless of the
+    # call-site default.
+    assert coerce_memory_type("message") == "semantic"
+    assert coerce_memory_type("MESSAGE ") == "semantic"
+    # LAB-487/LAB-533: the live off-enum value ("epistemic") is an explicit alias
+    # of "episodic" instead of raising ValidationError and nuking the batch.
     assert coerce_memory_type("epistemic") == "episodic"
-    # Other off-vocab / missing / wrong-type → default (NEVER None — memory_type
-    # has no None sentinel, so the field always gets a valid type).
-    assert coerce_memory_type("bogus") == "episodic"
-    assert coerce_memory_type(None) == "episodic"
-    assert coerce_memory_type(123) == "episodic"
-    assert coerce_memory_type("") == "episodic"
+    # Other off-vocab / wrong-type → "semantic" (NEVER None — memory_type has no
+    # None sentinel, so the field always gets a valid type).
+    assert coerce_memory_type("bogus") == "semantic"
+    assert coerce_memory_type(123) == "semantic"
     # Unhashable LLM output must NOT raise (a bare `in frozenset` would TypeError).
-    assert coerce_memory_type(["semantic"]) == "episodic"
-    assert coerce_memory_type({"type": "semantic"}) == "episodic"
+    assert coerce_memory_type(["semantic"]) == "semantic"
+    assert coerce_memory_type({"type": "semantic"}) == "semantic"
+    # Missing / empty → the call-site default.
+    assert coerce_memory_type(None) == "episodic"
+    assert coerce_memory_type("") == "episodic"
+    assert coerce_memory_type(None, default="semantic") == "semantic"
     # Capitalized/padded emissions normalize to the canonical lowercase value.
     assert coerce_memory_type("Semantic") == "semantic"
     assert coerce_memory_type("  Episodic  ") == "episodic"
-    # An explicit default is honored (callers may prefer a different fallback) —
-    # and "message" coerces to that explicit default too, not to "episodic".
-    assert coerce_memory_type("bogus", default="semantic") == "semantic"
-    assert coerce_memory_type("message", default="semantic") == "semantic"
 
 
 def test_extraction_confidence_default_is_scored():
@@ -853,9 +853,9 @@ async def test_session_thread_extraction_stamps_kind_and_confidence():
     assert records[0].kind == "opinion"
     assert records[1].kind is None
     assert records[2].kind is None
-    # The off-enum memory_type coerced to this site's default ("semantic"); its
-    # valid kind ("belief") is preserved.
-    assert records[3].memory_type == "semantic"
+    # The off-enum memory_type "epistemic" coerced via its explicit alias to
+    # "episodic" (LAB-533); its valid kind ("belief") is preserved.
+    assert records[3].memory_type == "episodic"
     assert records[3].kind == "belief"
 
 
@@ -974,7 +974,8 @@ async def test_strategy_aware_extraction_survives_off_enum_memory_type():
     by_text = {r.text: r for r in captured}
     assert by_text["Chris has a house on Beech Island"].memory_type == "semantic"
     assert by_text["valid episodic fact"].memory_type == "episodic"
-    # The 'epistemic' record persisted with its type coerced to the default.
+    # The 'epistemic' record persisted with its type coerced via the explicit
+    # 'epistemic' -> 'episodic' alias (LAB-533).
     assert by_text["Bow Lake is in Strafford NH"].memory_type == "episodic"
 
 

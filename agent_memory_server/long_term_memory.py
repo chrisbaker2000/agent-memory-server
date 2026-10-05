@@ -585,7 +585,9 @@ async def extract_memories_from_session_thread(
                     id=str(ULID()),
                     text=memory_data["text"],
                     memory_type=coerce_memory_type(
-                        memory_data.get("type"), default="semantic"
+                        memory_data.get("type"),
+                        default="semantic",
+                        site="session_thread",
                     ),
                     # F0 (LAB-395/LAB-397): epistemic kind from the extractor (coerced;
                     # off-vocab/missing → None = 'fact') + the model-paraphrase

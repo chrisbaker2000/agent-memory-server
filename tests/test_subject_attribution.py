@@ -25,6 +25,7 @@ from agent_memory_server.memory_strategies import (
     _load_family_context,
     _subject_attribution_preamble,
 )
+from agent_memory_server.utils.memory_type import MEMORY_TYPE_PROMPT_CONSTRAINT
 
 
 _DT = datetime(2026, 6, 20).strftime("%A, %B %d, %Y")
@@ -85,6 +86,7 @@ def test_discrete_prompt_formats():
         current_datetime=_DT,
         user_name="Chris Baker",
         family_context=_load_family_context(),
+        memory_type_constraint=MEMORY_TYPE_PROMPT_CONSTRAINT,
     )
     assert "Christian Baker is a lightweight rower" in out
     assert "Chris Baker — the application user" in out
@@ -96,6 +98,7 @@ def test_summary_prompt_formats():
         current_datetime=_DT,
         user_name="Chris Baker",
         family_context=_load_family_context(),
+        memory_type_constraint=MEMORY_TYPE_PROMPT_CONSTRAINT,
         max_length=500,
     )
     assert "KNOWN PEOPLE" in out
@@ -108,6 +111,7 @@ def test_preferences_prompt_formats():
         current_datetime=_DT,
         user_name="Chris Baker",
         family_context=_load_family_context(),
+        memory_type_constraint=MEMORY_TYPE_PROMPT_CONSTRAINT,
     )
     assert "KNOWN PEOPLE" in out
 

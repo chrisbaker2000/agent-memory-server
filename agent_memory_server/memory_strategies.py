@@ -18,6 +18,10 @@ from agent_memory_server.prompt_security import (
     validate_custom_prompt,
 )
 from agent_memory_server.telemetry import record_counter
+from agent_memory_server.utils.memory_type import (
+    MEMORY_TYPE_PROMPT_CONSTRAINT,
+    coerce_memory_type,
+)
 
 
 logger = get_logger(__name__)
@@ -134,7 +138,8 @@ def _subject_attribution_preamble(user_name: str, family_context: str) -> str:
         "spouse, children, relatives). Attribute each fact to the person it is "
         "ABOUT, who is frequently NOT the speaker:\n"
         f"{family_context}\n\n"
-        f"{_SUBJECT_ATTRIBUTION_RULE}\n"
+        f"{_SUBJECT_ATTRIBUTION_RULE}\n\n"
+        f"{MEMORY_TYPE_PROMPT_CONSTRAINT}\n"
     )
 
 
@@ -206,6 +211,8 @@ class DiscreteMemoryStrategy(BaseMemoryStrategy):
     who is frequently NOT the speaker:
     {family_context}
 
+    {memory_type_constraint}
+
     Extract two types of memories:
     1. EPISODIC: Memories about specific episodes in time.
        Example: "{user_name} had a bad experience on a flight to Paris in 2024"
@@ -244,7 +251,7 @@ class DiscreteMemoryStrategy(BaseMemoryStrategy):
 
     For each memory, return a JSON object with the following fields:
     - type: str -- The memory type, either "episodic" or "semantic"
-    - kind: str -- The EPISTEMIC type of the claim. One of:
+    - kind: str -- The epistemic CATEGORY of the claim (a separate field from "type"). One of:
         * "fact" -- an objectively-verifiable state of the world (default when unsure).
           e.g. "Christian Baker is a lightweight rower"
         * "event" -- a time-anchored occurrence. e.g. "Grant Baker had a therapy appointment on 2026-02-25"
@@ -318,6 +325,7 @@ class DiscreteMemoryStrategy(BaseMemoryStrategy):
             current_datetime=datetime.now().strftime("%A, %B %d, %Y at %I:%M %p %Z"),
             user_name=user_name,
             family_context=_load_family_context() or "(no roster available)",
+            memory_type_constraint=MEMORY_TYPE_PROMPT_CONSTRAINT,
         )
 
         async for attempt in AsyncRetrying(stop=stop_after_attempt(3)):
@@ -370,6 +378,8 @@ class SummaryMemoryStrategy(BaseMemoryStrategy):
     relatives). Attribute facts/preferences to the person they are ABOUT, who is
     frequently NOT the speaker:
     {family_context}
+
+    {memory_type_constraint}
 
     Create a summary that:
     1. Captures the main topics discussed
@@ -424,6 +434,7 @@ class SummaryMemoryStrategy(BaseMemoryStrategy):
             current_datetime=datetime.now().strftime("%A, %B %d, %Y at %I:%M %p %Z"),
             user_name=user_name,
             family_context=_load_family_context() or "(no roster available)",
+            memory_type_constraint=MEMORY_TYPE_PROMPT_CONSTRAINT,
         )
 
         async for attempt in AsyncRetrying(stop=stop_after_attempt(3)):
@@ -465,6 +476,8 @@ class UserPreferencesMemoryStrategy(BaseMemoryStrategy):
     (spouse, children, relatives). Attribute each preference to the person it is
     ABOUT, who is frequently NOT the speaker:
     {family_context}
+
+    {memory_type_constraint}
 
     Focus on extracting:
     1. User preferences (likes/dislikes, preferred options)
@@ -532,6 +545,7 @@ class UserPreferencesMemoryStrategy(BaseMemoryStrategy):
             current_datetime=datetime.now().strftime("%A, %B %d, %Y at %I:%M %p %Z"),
             user_name=user_name,
             family_context=_load_family_context() or "(no roster available)",
+            memory_type_constraint=MEMORY_TYPE_PROMPT_CONSTRAINT,
         )
 
         async for attempt in AsyncRetrying(stop=stop_after_attempt(3)):
@@ -649,6 +663,17 @@ class CustomMemoryStrategy(BaseMemoryStrategy):
                     # Filter and validate output memories for security
                     validated_memories = []
                     for memory in memories:
+                        # LAB-533: normalize an off-enum `type` (e.g. "epistemic")
+                        # BEFORE the security validator, which would otherwise drop
+                        # the whole memory for a near-miss enum value. A missing /
+                        # empty type is left as-is (the construction site defaults it).
+                        if isinstance(memory, dict) and memory.get("type"):
+                            memory = {
+                                **memory,
+                                "type": coerce_memory_type(
+                                    memory["type"], site="custom_strategy"
+                                ),
+                            }
                         if self._validate_memory_output(memory):
                             validated_memories.append(memory)
                         else:
