@@ -14,7 +14,16 @@ from agent_memory_server.config import settings
 from agent_memory_server.filters import DiscreteMemoryExtracted, MemoryType
 from agent_memory_server.llm import LLMClient
 from agent_memory_server.logging import get_logger
-from agent_memory_server.models import VISIBILITY_RANK, MemoryRecord, MemoryTypeEnum
+from agent_memory_server.models import VISIBILITY_RANK, MemoryRecord
+
+# LAB-487/LAB-533: memory_type normalization lives in a dependency-light module
+# (shared with memory_strategies.py without an import cycle); re-exported here for
+# the existing `from agent_memory_server.extraction import coerce_memory_type`
+# call sites and tests.
+from agent_memory_server.utils.memory_type import (
+    VALID_MEMORY_TYPES as VALID_MEMORY_TYPES,  # re-export (tests, back-compat)
+    coerce_memory_type,
+)
 
 
 if TYPE_CHECKING:
@@ -60,44 +69,6 @@ def coerce_extracted_kind(value: object) -> str | None:
         return None
     normalized = value.strip().lower()
     return normalized if normalized in VALID_MEMORY_KINDS else None
-
-
-# Valid LLM-emitted memory types for EXTRACTED memories. MemoryTypeEnum also
-# includes "message", but that is reserved for raw conversation-message records —
-# an extracted/derived fact must never be typed "message" (the session-thread path
-# also stamps session_id, so a "message"-typed extracted fact would pollute
-# message-only reconstruction/search paths). So "message" is deliberately excluded
-# here and coerces to the call-site default, like any other off-enum value.
-VALID_MEMORY_TYPES = frozenset(
-    {MemoryTypeEnum.EPISODIC.value, MemoryTypeEnum.SEMANTIC.value}
-)
-
-# The established default for discrete-extracted memories (matches the historical
-# `new_memory.get("type", "episodic")` at the construction site below).
-_DEFAULT_MEMORY_TYPE = "episodic"
-
-
-def coerce_memory_type(value: object, default: str = _DEFAULT_MEMORY_TYPE) -> str:
-    """Coerce an LLM-emitted ``memory_type`` to a valid EXTRACTED memory type.
-
-    Returns ``value`` only if it is ``"episodic"`` or ``"semantic"`` (the types an
-    extraction can legitimately produce — NOT ``"message"``, which is reserved for
-    raw conversation records, see VALID_MEMORY_TYPES). An off-enum (e.g. the live
-    ``"epistemic"`` from LAB-487), ``"message"``, missing, wrong-type, OR unhashable
-    ``memory_type`` becomes ``default`` instead of raising a pydantic
-    ``ValidationError`` on MemoryRecord construction — which, in the batched
-    extraction below, would abort EVERY record in the batch, not just the bad one.
-    This mirrors :func:`coerce_extracted_kind` for the sibling ``kind`` field; the
-    ``isinstance(value, str)`` guard is load-bearing (a bare ``in`` membership test
-    raises ``TypeError`` on an unhashable emission like ``["semantic"]``). The value
-    is normalized (strip + lowercase) so ``"Episodic"`` / ``"SEMANTIC "`` map to
-    canonical form. Unlike ``coerce_extracted_kind`` (None → read as ``fact``),
-    ``memory_type`` has no None sentinel, so this always returns a valid type.
-    """
-    if not isinstance(value, str):
-        return default
-    normalized = value.strip().lower()
-    return normalized if normalized in VALID_MEMORY_TYPES else default
 
 
 # ============================================================================
@@ -1120,7 +1091,9 @@ async def extract_memories_with_strategy(
                     MemoryRecord(
                         id=str(ulid.ULID()),
                         text=new_memory["text"],
-                        memory_type=coerce_memory_type(new_memory.get("type")),
+                        memory_type=coerce_memory_type(
+                            new_memory.get("type"), site="strategy_extraction"
+                        ),
                         # F0 (LAB-395/LAB-397): a strategy with an INVARIANT kind
                         # (summary→summary, preferences→preference) is AUTHORITATIVE —
                         # it overrides whatever the LLM emitted (a summary is always a
