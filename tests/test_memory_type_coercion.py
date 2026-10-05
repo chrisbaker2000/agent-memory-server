@@ -4,8 +4,10 @@ Observed live: ``memory_type='epistemic'`` raised a pydantic ValidationError on
 ``MemoryRecord`` and aborted the whole session-thread extraction. These tests lock:
 
 * the alias/unknown/missing coercion policy of ``coerce_memory_type`` (incl. the
-  WARNING carrying the original value + the ``memory_server.extraction.
-  memory_type_coerced`` counter),
+  WARNING + the ``memory_server.extraction.memory_type_coerced`` counter). The
+  WARNING and metric attributes name only a known alias key; any other raw LLM
+  value is described by safe metadata (type, length, short sha256) and must never
+  appear verbatim -- a model can put a secret-shaped string in ``type``,
 * the LIVE trailing-edge path end to end — ``run_delayed_extraction`` →
   ``extract_memories_from_session_thread`` → ``MemoryRecord`` →
   ``index_long_term_memories`` — so a coerced record actually reaches the persist
