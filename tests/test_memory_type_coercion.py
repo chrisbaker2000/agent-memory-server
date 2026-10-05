@@ -67,7 +67,8 @@ def test_epistemic_coerces_to_episodic_with_warning_and_counter(spy):
     warnings = _warnings(spy)
     assert len(warnings) == 2
     assert "'epistemic'" in warnings[0] and "'episodic'" in warnings[0]
-    assert "'  Epistemic '" in warnings[1]  # the ORIGINAL value, not normalized
+    # Only the KNOWN alias key is named — never the raw emitted string (codex F1).
+    assert "'epistemic'" in warnings[1] and "'  Epistemic '" not in warnings[1]
     assert (
         spy.counters
         == [
@@ -88,7 +89,9 @@ def test_epistemic_coerces_to_episodic_with_warning_and_counter(spy):
 def test_unknown_value_defaults_to_semantic_with_warning(spy):
     assert mt.coerce_memory_type("bogus-type", site="t") == "semantic"
     warnings = _warnings(spy)
-    assert len(warnings) == 1 and "'bogus-type'" in warnings[0]
+    # An unknown value is described by metadata only, never echoed (codex F1).
+    assert len(warnings) == 1 and "bogus-type" not in warnings[0]
+    assert "<str len=10 sha256=" in warnings[0]
     # Unknown values are bucketed — the raw LLM string is NOT a metric attribute
     # (bounded cardinality).
     assert spy.counters == [
@@ -150,6 +153,60 @@ def test_aliases_only_map_to_valid_extractable_types():
 def test_every_coerced_value_is_accepted_by_memory_record():
     for value in ["epistemic", "bogus", "message", 7, None, ""]:
         MemoryRecord(id="x", text="t", memory_type=mt.coerce_memory_type(value))
+
+
+# --- codex F1: the raw value must never reach logs or metric attributes --------
+
+
+def _key_shaped_value() -> str:
+    # Built at runtime (never a literal) so secret scanners don't trip.
+    return "sk-" + "a" * 40
+
+
+def _fragments(value: str) -> list[str]:
+    # The full value plus every 8-char window: no substring may leak either.
+    return [value] + [value[i : i + 8] for i in range(len(value) - 7)]
+
+
+def _assert_not_leaked(value: str, texts: list[str]):
+    for text in texts:
+        for frag in _fragments(value):
+            assert frag not in text, f"raw memory_type fragment leaked: {text!r}"
+
+
+def test_describe_unsafe_value_is_metadata_only():
+    value = _key_shaped_value()
+    desc = mt.describe_unsafe_value(value)
+    assert desc.startswith("<str len=43 sha256=")
+    _assert_not_leaked(value, [desc])
+    # Non-string input never raises and never echoes its contents.
+    assert mt.describe_unsafe_value([value]).startswith("<list len=")
+    _assert_not_leaked(value, [mt.describe_unsafe_value([value])])
+
+
+@pytest.mark.parametrize(
+    "wrap", [lambda v: v, lambda v: f"  {v.upper()} ", lambda v: [v]]
+)
+def test_key_shaped_type_never_logged_or_attributed(caplog, capsys, monkeypatch, wrap):
+    """Through the REAL logger, not the spy fixture. The structlog logger used by
+    utils/memory_type renders to stdout/stderr (not stdlib logging), so check the
+    captured streams as well as caplog."""
+    secret = _key_shaped_value()
+    value = wrap(secret)
+    counters: list[dict] = []
+    monkeypatch.setattr(
+        mt, "record_counter", lambda name, **kw: counters.append(kw["attributes"])
+    )
+    with caplog.at_level("DEBUG"):
+        assert mt.coerce_memory_type(value, site="t") == "semantic"
+    captured = capsys.readouterr()
+    texts = [r.getMessage() for r in caplog.records]
+    texts += [caplog.text, captured.out, captured.err]
+    texts += [str(v) for attrs in counters for v in attrs.values()]
+    assert any("Coerced off-enum" in t for t in texts)  # the WARNING did fire
+    assert len(counters) == 1 and "original" not in counters[0]
+    _assert_not_leaked(secret, texts)
+    _assert_not_leaked(secret.upper(), texts)
 
 
 # --- the LIVE session-thread path, end to end (extract -> construct -> persist)
@@ -247,7 +304,32 @@ async def test_live_path_unknown_type_persists_as_semantic(spy):
     )
     assert count == 1
     assert persisted[0].memory_type == "semantic"
-    assert any("'TOTALLY-NEW-TYPE'" in w for w in _warnings(spy))
+    warnings = _warnings(spy)
+    assert len(warnings) == 1 and "sha256=" in warnings[0]
+    assert "TOTALLY-NEW-TYPE" not in warnings[0]
+
+
+@pytest.mark.asyncio
+async def test_live_path_key_shaped_type_stored_semantic_and_not_logged(
+    caplog, capsys, monkeypatch
+):
+    secret = _key_shaped_value()
+    counters: list[dict] = []
+    monkeypatch.setattr(
+        mt, "record_counter", lambda name, **kw: counters.append(kw["attributes"])
+    )
+    with caplog.at_level("DEBUG"):
+        count, persisted = await _run_delayed(
+            [{"text": "User A wants a garage", "type": secret}]
+        )
+    assert count == 1
+    assert persisted[0].memory_type == "semantic"
+    captured = capsys.readouterr()
+    texts = [r.getMessage() for r in caplog.records]
+    texts += [caplog.text, captured.out, captured.err]
+    texts += [str(v) for attrs in counters for v in attrs.values()]
+    assert any("Coerced off-enum" in t for t in texts)
+    _assert_not_leaked(secret, texts)
 
 
 @pytest.mark.asyncio

@@ -15,6 +15,10 @@ Policy (LAB-533) — never widen the enum; normalize BEFORE validation:
 * ``"episodic"`` / ``"semantic"`` (case/whitespace-insensitive) → canonical, silent.
 * A known alias/typo (``_MEMORY_TYPE_ALIASES``, e.g. ``"epistemic"`` → ``"episodic"``)
   → its mapped value, WARNING + counter.
+
+The raw emitted value is NEVER logged or used as a metric attribute (it may carry
+a secret fragment and bypasses the write-funnel redaction): only a known alias key
+is named; anything else is logged as type/length/sha256-prefix metadata.
 * Any other non-empty string — including ``"message"``, which is a valid enum value
   but reserved for raw conversation records — → ``"semantic"`` (the safe default:
   a timeless fact is the least-wrong reading of an unclassifiable extraction),
@@ -26,6 +30,8 @@ Policy (LAB-533) — never widen the enum; normalize BEFORE validation:
 """
 
 from __future__ import annotations
+
+import hashlib
 
 from agent_memory_server.logging import get_logger
 from agent_memory_server.models import MemoryTypeEnum
@@ -68,26 +74,41 @@ DEFAULT_MEMORY_TYPE = MemoryTypeEnum.EPISODIC.value
 
 COERCION_METRIC = "memory_server.extraction.memory_type_coerced"
 
-# Bound how much of an LLM-emitted value reaches the log line.
-_LOG_VALUE_MAX = 64
 
+def describe_unsafe_value(value: object) -> str:
+    """Non-reversible, log-safe description of an untrusted LLM value.
 
-def _report_coercion(original: object, coerced: str, reason: str, site: str) -> None:
-    """WARNING (carrying the original value) + SigNoz counter for one coercion.
-
-    The counter's attributes are bounded-cardinality: the raw original value only
-    appears as an attribute for alias hits (a fixed key set); unknown/invalid
-    values are bucketed so arbitrary LLM output can't explode metric cardinality.
+    Never includes the value or any substring of it — only the Python type name,
+    the length (of ``str(value)``) and the first 8 hex chars of its sha256. The
+    raw value is junk by definition and may carry a secret/PII fragment that the
+    write-funnel redaction (content_security) never sees on this path (codex F1).
     """
+    rendered = value if isinstance(value, str) else repr(value)
+    digest = hashlib.sha256(rendered.encode("utf-8", "replace")).hexdigest()[:8]
+    return f"<{type(value).__name__} len={len(rendered)} sha256={digest}>"
+
+
+def _report_coercion(
+    original: object, coerced: str, reason: str, site: str, label: str | None
+) -> None:
+    """WARNING + SigNoz counter for one coercion — WITHOUT the raw value.
+
+    ``label`` is a KNOWN, trusted key (an alias-map key or the reserved enum value
+    ``"message"``) and is the only form of the original that may appear in the log
+    or as a metric attribute. Anything else is described by
+    :func:`describe_unsafe_value` in the log and never reaches metric attributes
+    (no leakage, bounded cardinality).
+    """
+    shown = repr(label) if label is not None else describe_unsafe_value(original)
     # f-string, not %-args: the structlog config has no PositionalArgumentsFormatter,
     # so positional args would not be interpolated into the rendered event.
     logger.warning(
-        f"Coerced off-enum extracted memory_type {repr(original)[:_LOG_VALUE_MAX]}"
+        f"Coerced off-enum extracted memory_type {shown}"
         f" -> {coerced!r} (reason={reason}, site={site})"
     )
     attrs = {"reason": reason, "coerced_to": coerced, "site": site}
-    if reason == "alias" and isinstance(original, str):
-        attrs["original"] = original.strip().lower()
+    if reason == "alias" and label is not None:
+        attrs["original"] = label
     record_counter(COERCION_METRIC, attributes=attrs)
 
 
@@ -117,7 +138,9 @@ def coerce_memory_type(
     if value is None:
         return default
     if not isinstance(value, str):
-        _report_coercion(value, UNKNOWN_MEMORY_TYPE_FALLBACK, "invalid_type", site)
+        _report_coercion(
+            value, UNKNOWN_MEMORY_TYPE_FALLBACK, "invalid_type", site, None
+        )
         return UNKNOWN_MEMORY_TYPE_FALLBACK
     normalized = value.strip().lower()
     if not normalized:
@@ -126,10 +149,14 @@ def coerce_memory_type(
         return normalized
     alias = _MEMORY_TYPE_ALIASES.get(normalized)
     if alias is not None:
-        _report_coercion(value, alias, "alias", site)
+        _report_coercion(value, alias, "alias", site, normalized)
         return alias
-    reason = "reserved" if normalized == MemoryTypeEnum.MESSAGE.value else "unknown"
-    _report_coercion(value, UNKNOWN_MEMORY_TYPE_FALLBACK, reason, site)
+    if normalized == MemoryTypeEnum.MESSAGE.value:
+        _report_coercion(
+            value, UNKNOWN_MEMORY_TYPE_FALLBACK, "reserved", site, normalized
+        )
+    else:
+        _report_coercion(value, UNKNOWN_MEMORY_TYPE_FALLBACK, "unknown", site, None)
     return UNKNOWN_MEMORY_TYPE_FALLBACK
 
 
