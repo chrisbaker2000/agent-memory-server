@@ -15,6 +15,7 @@ import re
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from tenacity import RetryError
 
 from agent_memory_server.llm.types import ChatCompletionResponse
 from agent_memory_server.long_term_memory import (
@@ -22,7 +23,10 @@ from agent_memory_server.long_term_memory import (
     extract_memories_from_session_thread,
     run_delayed_extraction,
 )
-from agent_memory_server.memory_strategies import DiscreteMemoryStrategy
+from agent_memory_server.memory_strategies import (
+    DiscreteMemoryStrategy,
+    _require_memories_list,
+)
 from agent_memory_server.models import MemoryMessage, WorkingMemory
 from agent_memory_server.utils.llm_json import parse_llm_json_object
 from agent_memory_server.working_memory import get_working_memory, set_working_memory
@@ -104,6 +108,49 @@ class TestDiscreteStrategyParsesFencedOutput:
             )
         assert memories == PAYLOAD["memories"]
         assert mock.await_count == 1  # no retry burned on a parse failure
+
+    @pytest.mark.asyncio
+    async def test_off_schema_object_is_retried_not_read_as_empty(self):
+        # codex F1: a parseable object without "memories" must not become [].
+        mock = AsyncMock(
+            side_effect=[
+                _response('```json\n{"error": "rate limited"}\n```'),
+                _response(BODY),
+            ]
+        )
+        with patch(
+            "agent_memory_server.memory_strategies.LLMClient.create_chat_completion",
+            mock,
+        ):
+            memories = await DiscreteMemoryStrategy().extract_memories("x")
+        assert memories == PAYLOAD["memories"]
+        assert mock.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_persistent_off_schema_output_raises(self):
+        mock = AsyncMock(return_value=_response('{"error": "rate limited"}'))
+        with (
+            patch(
+                "agent_memory_server.memory_strategies.LLMClient.create_chat_completion",
+                mock,
+            ),
+            pytest.raises(RetryError),
+        ):
+            await DiscreteMemoryStrategy().extract_memories("x")
+        assert mock.await_count == 3
+
+
+class TestRequireMemoriesList:
+    def test_explicit_empty_list_is_a_legitimate_empty_result(self):
+        assert _require_memories_list({"memories": []}) == []
+
+    @pytest.mark.parametrize(
+        "data",
+        [{}, {"error": "rate limited"}, {"memories": None}, {"memories": "x"}],
+    )
+    def test_missing_or_non_list_raises(self, data):
+        with pytest.raises(ValueError, match="no 'memories' list"):
+            _require_memories_list(data)
 
 
 @pytest.mark.asyncio

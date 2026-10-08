@@ -28,6 +28,26 @@ from agent_memory_server.utils.memory_type import (
 logger = get_logger(__name__)
 
 
+def _require_memories_list(response_data: dict[str, Any]) -> list[Any]:
+    """Return ``response_data["memories"]``, failing loudly if it is absent.
+
+    Why: ``parse_llm_json_object`` tolerates fences and prose, so an off-schema
+    object (``{"error": "rate limited"}``, or an example object lifted from
+    surrounding prose) now parses. ``.get("memories", [])`` would turn that into
+    a "successful empty extraction", and the session-thread caller would mark
+    the thread's messages extracted — silently dropping its facts. Raising lets
+    tenacity retry and, once exhausted, surfaces as ``MemoryExtractionError``.
+    An explicit ``{"memories": []}`` is still a legitimate empty result.
+    """
+    memories = response_data.get("memories")
+    if not isinstance(memories, list):
+        raise ValueError(
+            "LLM JSON response has no 'memories' list "
+            f"(keys: {sorted(response_data)[:10]})"
+        )
+    return memories
+
+
 # ---------------------------------------------------------------------------
 # Family roster for subject attribution (root-cause fix, 2026-06-20).
 # The discrete extraction prompt centered every fact on the SPEAKER ({user_name}),
@@ -338,7 +358,7 @@ class DiscreteMemoryStrategy(BaseMemoryStrategy):
                 )
                 try:
                     response_data = parse_llm_json_object(response.content)
-                    return response_data.get("memories", [])
+                    return _require_memories_list(response_data)
                 except json.JSONDecodeError:
                     logger.error(f"Error decoding JSON: {response.content}")
                     raise
@@ -447,7 +467,7 @@ class SummaryMemoryStrategy(BaseMemoryStrategy):
                 )
                 try:
                     response_data = parse_llm_json_object(response.content)
-                    return response_data.get("memories", [])
+                    return _require_memories_list(response_data)
                 except json.JSONDecodeError:
                     logger.error(f"Error decoding JSON: {response.content}")
                     raise
@@ -558,7 +578,7 @@ class UserPreferencesMemoryStrategy(BaseMemoryStrategy):
                 )
                 try:
                     response_data = parse_llm_json_object(response.content)
-                    return response_data.get("memories", [])
+                    return _require_memories_list(response_data)
                 except json.JSONDecodeError:
                     logger.error(f"Error decoding JSON: {response.content}")
                     raise
@@ -659,7 +679,7 @@ class CustomMemoryStrategy(BaseMemoryStrategy):
                 )
                 try:
                     response_data = parse_llm_json_object(response.content)
-                    memories = response_data.get("memories", [])
+                    memories = _require_memories_list(response_data)
 
                     # Filter and validate output memories for security
                     validated_memories = []
