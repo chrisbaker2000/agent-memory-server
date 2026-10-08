@@ -263,6 +263,8 @@ async def schedule_trailing_extraction(
     source_user: str | None = None,
     source_channel: str | None = None,
     visibility: str | None = None,
+    delay_seconds: int | None = None,
+    retry_attempt: int = 0,
 ) -> None:
     """
     Schedule a trailing-edge debounced extraction.
@@ -281,11 +283,18 @@ async def schedule_trailing_extraction(
         source_user: Attribution source user to propagate to extracted memories
         source_channel: Attribution source channel to propagate to extracted memories
         visibility: Visibility scope to propagate to extracted memories
+        delay_seconds: Override the debounce delay (used for failure retries).
+        retry_attempt: Failure-retry counter carried to run_delayed_extraction;
+            0 for message-triggered schedules (a new message resets it).
     """
     from datetime import timedelta
 
     pending_key = f"{EXTRACTION_PENDING_KEY_PREFIX}:{session_id}"
-    debounce_seconds = settings.extraction_debounce_seconds
+    debounce_seconds = (
+        delay_seconds
+        if delay_seconds is not None
+        else settings.extraction_debounce_seconds
+    )
 
     # Calculate when extraction should run (trailing edge)
     extraction_time = datetime.now(UTC) + timedelta(seconds=debounce_seconds)
@@ -323,6 +332,7 @@ async def schedule_trailing_extraction(
                     source_user=source_user,
                     source_channel=source_channel,
                     visibility=visibility,
+                    retry_attempt=retry_attempt,
                 )
                 logger.debug(f"Docket task scheduled with key {task_key}")
         except Exception as e:
@@ -343,6 +353,7 @@ async def schedule_trailing_extraction(
                     source_user=source_user,
                     source_channel=source_channel,
                     visibility=visibility,
+                    retry_attempt=retry_attempt,
                 )
             finally:
                 # Remove task from tracking set when done
@@ -365,6 +376,7 @@ async def run_delayed_extraction(
     source_user: str | None = None,
     source_channel: str | None = None,
     visibility: str | None = None,
+    retry_attempt: int = 0,
 ) -> int:
     """
     Run the delayed extraction if this task is still valid.
@@ -478,14 +490,88 @@ async def run_delayed_extraction(
 
         return len(extracted_memories)
 
+    except MemoryExtractionError as e:
+        # Messages stay discrete_memory_extracted="f" (they are only flipped after
+        # a successful extraction above). Reschedule with backoff so a quiet
+        # session is retried without waiting for its next message.
+        await redis.delete(pending_key)
+        await _schedule_extraction_retry(
+            session_id=session_id,
+            namespace=namespace,
+            user_id=user_id,
+            redis=redis,
+            source_user=source_user,
+            source_channel=source_channel,
+            visibility=visibility,
+            retry_attempt=retry_attempt,
+            error=e,
+        )
+        return 0
+
     except Exception as e:
-        # Includes MemoryExtractionError: messages stay discrete_memory_extracted="f"
-        # (they are only flipped after a successful extraction above), so the next
-        # scheduled run re-extracts them instead of silently dropping their facts.
         logger.error(f"Error in trailing extraction for session {session_id}: {e}")
         # Clear the pending key to allow retry on next message
         await redis.delete(pending_key)
         return 0
+
+
+async def _schedule_extraction_retry(
+    *,
+    session_id: str,
+    namespace: str | None,
+    user_id: str | None,
+    redis: Redis,
+    source_user: str | None,
+    source_channel: str | None,
+    visibility: str | None,
+    retry_attempt: int,
+    error: Exception,
+) -> None:
+    """Reschedule a failed extraction with exponential backoff, or give up loudly.
+
+    Retry n (1-based) runs after ``extraction_failure_retry_base_seconds *
+    2**(n-1)``. After ``extraction_failure_max_retries`` the messages are left
+    unextracted (a later message still triggers a fresh attempt) and an ERROR +
+    ``memory_server.extraction.failed`` counter (``outcome=exhausted``) are
+    emitted so the stall is visible in SigNoz rather than silent.
+    """
+    next_attempt = retry_attempt + 1
+    max_retries = settings.extraction_failure_max_retries
+    if next_attempt > max_retries:
+        logger.error(
+            f"Extraction for session {session_id} failed after {max_retries} "
+            f"retries; messages left unextracted until the next message: {error}"
+        )
+        record_counter(
+            "memory_server.extraction.failed", attributes={"outcome": "exhausted"}
+        )
+        return
+
+    delay = settings.extraction_failure_retry_base_seconds * 2 ** (next_attempt - 1)
+    logger.error(
+        f"Extraction for session {session_id} failed ({error}); "
+        f"retry {next_attempt}/{max_retries} in {delay}s"
+    )
+    record_counter(
+        "memory_server.extraction.failed", attributes={"outcome": "retry_scheduled"}
+    )
+    try:
+        await schedule_trailing_extraction(
+            session_id=session_id,
+            namespace=namespace,
+            user_id=user_id,
+            redis=redis,
+            source_user=source_user,
+            source_channel=source_channel,
+            visibility=visibility,
+            delay_seconds=delay,
+            retry_attempt=next_attempt,
+        )
+    except Exception as schedule_error:
+        logger.error(
+            f"Could not schedule extraction retry for session {session_id}: "
+            f"{schedule_error}; messages stay unextracted until the next message"
+        )
 
 
 async def extract_memories_from_session_thread(

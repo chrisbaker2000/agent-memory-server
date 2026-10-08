@@ -192,43 +192,151 @@ class TestExtractionFailureDoesNotDropMessages:
             )
         assert isinstance(exc.value.__cause__, json.JSONDecodeError)
 
+    async def _run_failing(self, redis, retry_attempt=0):
+        """Run one failing delayed extraction; return (count, schedule mock, counter mock)."""
+        await self._seed(redis)
+        with (
+            patch(
+                "agent_memory_server.long_term_memory.extract_memories_from_session_thread",
+                AsyncMock(side_effect=MemoryExtractionError("llm down")),
+            ),
+            patch(
+                "agent_memory_server.long_term_memory.index_long_term_memories"
+            ) as mock_index,
+            patch(
+                "agent_memory_server.long_term_memory.schedule_trailing_extraction",
+                AsyncMock(),
+            ) as mock_schedule,
+            patch(
+                "agent_memory_server.long_term_memory.record_counter"
+            ) as mock_counter,
+        ):
+            count = await run_delayed_extraction(
+                session_id=self.SESSION,
+                namespace=self.NS,
+                user_id=self.USER,
+                scheduled_timestamp=None,
+                retry_attempt=retry_attempt,
+            )
+        mock_index.assert_not_called()
+        return count, mock_schedule, mock_counter
+
+    async def _flags(self, redis):
+        wm = await get_working_memory(
+            session_id=self.SESSION,
+            user_id=self.USER,
+            namespace=self.NS,
+            redis_client=redis,
+        )
+        assert wm is not None
+        return [m.discrete_memory_extracted for m in wm.messages]
+
+    @pytest.fixture(autouse=True)
+    def _extraction_settings(self):
+        from agent_memory_server.config import settings
+
+        saved = (
+            settings.enable_discrete_memory_extraction,
+            settings.extraction_failure_max_retries,
+            settings.extraction_failure_retry_base_seconds,
+        )
+        settings.enable_discrete_memory_extraction = True
+        settings.extraction_failure_max_retries = 3
+        settings.extraction_failure_retry_base_seconds = 300
+        yield
+        (
+            settings.enable_discrete_memory_extraction,
+            settings.extraction_failure_max_retries,
+            settings.extraction_failure_retry_base_seconds,
+        ) = saved
+
     async def test_delayed_extraction_leaves_messages_unextracted(
         self, async_redis_client, mock_memory_vector_db
     ):
-        from agent_memory_server.config import settings
+        count, _, _ = await self._run_failing(async_redis_client)
+        assert count == 0
+        assert await self._flags(async_redis_client) == ["f"]
 
-        original = settings.enable_discrete_memory_extraction
-        settings.enable_discrete_memory_extraction = True
-        try:
-            await self._seed(async_redis_client)
-            with (
-                patch(
-                    "agent_memory_server.long_term_memory.extract_memories_from_session_thread",
-                    AsyncMock(side_effect=MemoryExtractionError("llm down")),
-                ),
-                patch(
-                    "agent_memory_server.long_term_memory.index_long_term_memories"
-                ) as mock_index,
-            ):
-                count = await run_delayed_extraction(
-                    session_id=self.SESSION,
-                    namespace=self.NS,
-                    user_id=self.USER,
-                    scheduled_timestamp=None,
-                )
+    @pytest.mark.parametrize("attempt,delay", [(0, 300), (1, 600), (2, 1200)])
+    async def test_failure_schedules_backed_off_retry(
+        self, async_redis_client, mock_memory_vector_db, attempt, delay
+    ):
+        # codex round 2 F1: a quiet session must be retried without a new message.
+        _, mock_schedule, mock_counter = await self._run_failing(
+            async_redis_client, retry_attempt=attempt
+        )
+        mock_schedule.assert_awaited_once()
+        kwargs = mock_schedule.await_args.kwargs
+        assert kwargs["session_id"] == self.SESSION
+        assert kwargs["namespace"] == self.NS
+        assert kwargs["user_id"] == self.USER
+        assert kwargs["delay_seconds"] == delay
+        assert kwargs["retry_attempt"] == attempt + 1
+        mock_counter.assert_called_once_with(
+            "memory_server.extraction.failed",
+            attributes={"outcome": "retry_scheduled"},
+        )
 
-            assert count == 0
-            mock_index.assert_not_called()
-            wm = await get_working_memory(
-                session_id=self.SESSION,
-                user_id=self.USER,
-                namespace=self.NS,
-                redis_client=async_redis_client,
+    async def test_retries_exhausted_stops_and_reports(
+        self, async_redis_client, mock_memory_vector_db
+    ):
+        count, mock_schedule, mock_counter = await self._run_failing(
+            async_redis_client, retry_attempt=3
+        )
+        assert count == 0
+        mock_schedule.assert_not_awaited()
+        mock_counter.assert_called_once_with(
+            "memory_server.extraction.failed", attributes={"outcome": "exhausted"}
+        )
+        assert await self._flags(async_redis_client) == ["f"]
+
+
+@pytest.mark.asyncio
+async def test_schedule_passes_delay_and_retry_attempt_to_asyncio_task(
+    async_redis_client,
+):
+    """The retry delay/attempt must reach run_delayed_extraction (no-docket path)."""
+    import asyncio
+
+    from agent_memory_server.config import settings
+    from agent_memory_server.long_term_memory import schedule_trailing_extraction
+
+    saved = settings.use_docket
+    settings.use_docket = False
+    sleeps: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+        await real_sleep(0)
+
+    try:
+        with (
+            patch("asyncio.sleep", fake_sleep),
+            patch(
+                "agent_memory_server.long_term_memory.run_delayed_extraction",
+                AsyncMock(return_value=0),
+            ) as mock_run,
+        ):
+            await schedule_trailing_extraction(
+                session_id="s",
+                namespace="n",
+                user_id="u",
+                redis=async_redis_client,
+                delay_seconds=600,
+                retry_attempt=2,
             )
-            assert wm is not None
-            assert [m.discrete_memory_extracted for m in wm.messages] == ["f"]
-        finally:
-            settings.enable_discrete_memory_extraction = original
+            for _ in range(5):
+                if mock_run.await_count:
+                    break
+                await real_sleep(0.01)
+        assert sleeps[0] == 600
+        mock_run.assert_awaited_once()
+        assert mock_run.await_args.kwargs["retry_attempt"] == 2
+        ttl = await async_redis_client.ttl("extraction_pending:s")
+        assert 600 < ttl <= 1200
+    finally:
+        settings.use_docket = saved
 
 
 def test_no_bare_json_loads_of_llm_content():
