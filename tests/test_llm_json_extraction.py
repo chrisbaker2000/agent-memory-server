@@ -339,6 +339,52 @@ async def test_schedule_passes_delay_and_retry_attempt_to_asyncio_task(
         settings.use_docket = saved
 
 
+@pytest.mark.asyncio
+async def test_strategy_aware_failure_leaves_parent_unextracted():
+    """codex round 3 F1: extract_memories_with_strategy must not mark a parent
+    "t" when its strategy raises — that permanently dropped its facts."""
+    from unittest.mock import MagicMock
+
+    import agent_memory_server.extraction as ext
+    from agent_memory_server.models import MemoryRecord
+
+    class _FailingStrategy:
+        async def extract_memories(self, text, source_user_name=None):
+            raise ValueError("LLM JSON response has no 'memories' list")
+
+    fake_db = MagicMock()
+    fake_db.update_memories = AsyncMock(return_value=1)
+    index = AsyncMock()
+    parent = MemoryRecord(
+        id="msg-fail",
+        text="a conversation",
+        memory_type="message",
+        extraction_strategy="discrete",
+        extraction_strategy_config={},
+        discrete_memory_extracted="f",
+    )
+    with (
+        patch(
+            "agent_memory_server.memory_vector_db_factory.get_memory_vector_db",
+            AsyncMock(return_value=fake_db),
+        ),
+        patch(
+            "agent_memory_server.memory_strategies.get_memory_strategy",
+            return_value=_FailingStrategy(),
+        ),
+        patch("agent_memory_server.long_term_memory.index_long_term_memories", index),
+        patch("agent_memory_server.extraction.record_counter") as counter,
+    ):
+        await ext.extract_memories_with_strategy(memories=[parent], deduplicate=False)
+
+    fake_db.update_memories.assert_not_called()
+    index.assert_not_called()
+    counter.assert_called_once_with(
+        "memory_server.extraction.failed",
+        attributes={"outcome": "left_unextracted", "site": "strategy"},
+    )
+
+
 def test_no_bare_json_loads_of_llm_content():
     """Every LLM-output parse must go through parse_llm_json_object."""
     src = pathlib.Path(__file__).resolve().parent.parent / "agent_memory_server"

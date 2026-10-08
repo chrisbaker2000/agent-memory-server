@@ -20,6 +20,7 @@ from agent_memory_server.models import VISIBILITY_RANK, MemoryRecord
 # (shared with memory_strategies.py without an import cycle); re-exported here for
 # the existing `from agent_memory_server.extraction import coerce_memory_type`
 # call sites and tests.
+from agent_memory_server.telemetry import record_counter
 from agent_memory_server.utils.llm_json import parse_llm_json_object
 from agent_memory_server.utils.memory_type import (
     VALID_MEMORY_TYPES as VALID_MEMORY_TYPES,  # re-export (tests, back-compat)
@@ -1065,14 +1066,20 @@ async def extract_memories_with_strategy(
                 all_updated_memories.append(updated_memory)
 
             except Exception as e:
+                # Leave the parent discrete_memory_extracted="f". Marking it "t"
+                # here permanently dropped every fact in it on any LLM/parse
+                # failure (2026-10-08, Haiku 5.5 fenced JSON). There is no
+                # automatic retry loop to guard against: the live callers pass
+                # only newly indexed messages, so an "f" parent is retried only
+                # by a no-arg scan (memories=None), which is the recovery path.
                 logger.error(
-                    f"Error extracting memory {memory.id} with strategy {strategy_name}: {e}"
+                    f"Error extracting memory {memory.id} with strategy {strategy_name}; "
+                    f"left unextracted for a later scan: {e}"
                 )
-                # Still mark as processed to avoid infinite retry
-                updated_memory = memory.model_copy(
-                    update={"discrete_memory_extracted": "t"}
+                record_counter(
+                    "memory_server.extraction.failed",
+                    attributes={"outcome": "left_unextracted", "site": "strategy"},
                 )
-                all_updated_memories.append(updated_memory)
 
     # Update processed memories
     if all_updated_memories:
