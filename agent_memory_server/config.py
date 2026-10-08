@@ -537,6 +537,11 @@ class Settings(BaseSettings):
     # Debounce period (in seconds) for thread-aware memory extraction.
     # Prevents constant re-extraction as new messages arrive in a conversation.
     extraction_debounce_seconds: int = 30
+    # Automatic retry after a failed extraction (MemoryExtractionError). Without
+    # it a quiet session keeps its unextracted messages until another message
+    # arrives. Delay for retry n (1-based) is base * 2**(n-1): 300s, 600s, 1200s.
+    extraction_failure_max_retries: int = Field(default=3, ge=0)
+    extraction_failure_retry_base_seconds: int = Field(default=300, gt=0)
 
     # Query optimization settings
     query_optimization_prompt_template: str = """Transform this natural language query into an optimized version for semantic search. The goal is to make it more effective for finding semantically similar content while preserving the original intent.
