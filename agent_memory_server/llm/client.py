@@ -285,7 +285,7 @@ class LLMClient:
         Resolution order:
         1. MODEL_CONFIGS (custom overrides)
         2. LLMClient's internal model database
-        3. Fallback to claude-haiku-4-5 defaults with warning (post-Azure 2026-04-20)
+        3. Fallback to claude-haiku-5-5 defaults with warning (2026-10-08; was haiku-4-5)
 
         Args:
             model_name: Name of the model (e.g., "gpt-5", "claude-3-sonnet-20240229")
@@ -319,13 +319,13 @@ class LLMClient:
         except Exception as e:
             logger.debug(f"Failed to resolve model configuration for {model_name}: {e}")
 
-        # Final fallback to claude-haiku-4-5 defaults (post-Azure 2026-04-20)
+        # Final fallback to claude-haiku-5-5 defaults (2026-10-08 — current-generation only)
         logger.warning(
             f"Model {model_name!r} not found in LLMClient model database or MODEL_CONFIGS. "
-            "Using claude-haiku-4-5 defaults."
+            "Using claude-haiku-5-5 defaults."
         )
         return MODEL_CONFIGS.get(
-            "claude-haiku-4-5-20251001",
+            "claude-haiku-5-5",
             ModelConfig(
                 provider=cls._map_provider("anthropic"),
                 name=model_name,

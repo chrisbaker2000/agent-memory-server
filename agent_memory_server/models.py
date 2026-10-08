@@ -99,6 +99,10 @@ ModelNameLiteral = Literal[
     # Anthropic Claude 4.6 family
     "claude-sonnet-4-6",
     "claude-opus-4-6",
+    # Anthropic Claude 5.5 family (current generation; no date suffix)
+    "claude-opus-5-5",
+    "claude-sonnet-5-5",
+    "claude-haiku-5-5",
 ]
 
 
