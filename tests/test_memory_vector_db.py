@@ -853,6 +853,7 @@ class TestHybridSearch:
 
         with patch("agent_memory_server.config.settings") as mock_settings:
             mock_settings.hybrid_search_enabled = True
+            mock_settings.vector_search_ef_runtime = 100
             mock_settings.hybrid_search_rrf_k = 60
             mock_settings.hybrid_search_text_results_multiplier = 3
 
@@ -889,6 +890,7 @@ class TestHybridSearch:
 
         with patch("agent_memory_server.config.settings") as mock_settings:
             mock_settings.hybrid_search_enabled = True
+            mock_settings.vector_search_ef_runtime = 100
             mock_settings.hybrid_search_rrf_k = 60
             mock_settings.hybrid_search_text_results_multiplier = 3
 
@@ -923,6 +925,7 @@ class TestHybridSearch:
 
         with patch("agent_memory_server.config.settings") as mock_settings:
             mock_settings.hybrid_search_enabled = False  # Config disabled
+            mock_settings.vector_search_ef_runtime = 100
 
             results = await db.search_memories(
                 query="test query",
@@ -957,6 +960,7 @@ class TestHybridSearch:
 
         with patch("agent_memory_server.config.settings") as mock_settings:
             mock_settings.hybrid_search_enabled = True
+            mock_settings.vector_search_ef_runtime = 100
             mock_settings.hybrid_search_rrf_k = 60
             mock_settings.hybrid_search_text_results_multiplier = 3
 
@@ -995,6 +999,7 @@ class TestHybridSearch:
 
         with patch("agent_memory_server.config.settings") as mock_settings:
             mock_settings.hybrid_search_enabled = True
+            mock_settings.vector_search_ef_runtime = 100
             mock_settings.hybrid_search_rrf_k = 60
             mock_settings.hybrid_search_text_results_multiplier = 3
 
@@ -1037,6 +1042,7 @@ class TestHybridSearch:
 
         with patch("agent_memory_server.config.settings") as mock_settings:
             mock_settings.hybrid_search_enabled = True
+            mock_settings.vector_search_ef_runtime = 100
             mock_settings.hybrid_search_rrf_k = 60
             mock_settings.hybrid_search_text_results_multiplier = 3
 
@@ -1059,6 +1065,7 @@ class TestHybridSearch:
 
         with patch("agent_memory_server.config.settings") as mock_settings:
             mock_settings.hybrid_search_enabled = True
+            mock_settings.vector_search_ef_runtime = 100
             mock_settings.hybrid_search_rrf_k = 60
             mock_settings.hybrid_search_text_results_multiplier = 3
 
@@ -1093,6 +1100,7 @@ class TestHybridSearch:
 
         with patch("agent_memory_server.config.settings") as mock_settings:
             mock_settings.hybrid_search_enabled = True
+            mock_settings.vector_search_ef_runtime = 100
             mock_settings.hybrid_search_rrf_k = 60
             mock_settings.hybrid_search_text_results_multiplier = 3
 
@@ -1118,6 +1126,7 @@ class TestHybridSearch:
 
         with patch("agent_memory_server.config.settings") as mock_settings:
             mock_settings.hybrid_search_enabled = False
+            mock_settings.vector_search_ef_runtime = 100
             mock_settings.hybrid_search_rrf_k = 60
             mock_settings.hybrid_search_text_results_multiplier = 3
 
@@ -1141,6 +1150,7 @@ class TestHybridSearch:
 
         with patch("agent_memory_server.config.settings") as mock_settings:
             mock_settings.hybrid_search_enabled = True
+            mock_settings.vector_search_ef_runtime = 100
             mock_settings.hybrid_search_rrf_k = 60
             mock_settings.hybrid_search_text_results_multiplier = 3
 
