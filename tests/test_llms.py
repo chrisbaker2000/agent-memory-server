@@ -17,7 +17,7 @@ from agent_memory_server.llm import (
         ("gpt-4o", "openai", 128000),
         ("claude-3-sonnet-20240229", "anthropic", 200000),
         ("anthropic.claude-sonnet-4-5-20250929-v1:0", "aws-bedrock", 200000),
-        ("nonexistent-model", "openai", 400000),  # Should default to gpt-5-mini
+        ("nonexistent-model", "anthropic", 1000000),  # Falls back to the claude-haiku-5-5 config
     ],
 )
 def test_get_model_config(model_name, expected_provider, expected_max_tokens):
@@ -45,7 +45,9 @@ def test_get_model_config_via_llmclient():
 
     # Test fallback for unknown model
     config = LLMClient.get_model_config("unknown-model")
-    assert config.provider == ModelProvider.OPENAI  # Defaults to gpt-4o-mini
+    # Unknown models fall back to the Claude Haiku 5.5 config (deployed default).
+    assert config.provider == ModelProvider.ANTHROPIC
+    assert config.name == "claude-haiku-5-5"
 
 
 @pytest.mark.asyncio

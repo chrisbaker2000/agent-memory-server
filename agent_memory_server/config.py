@@ -182,6 +182,26 @@ MODEL_CONFIGS = {
         max_tokens=200000,
         embedding_dimensions=1536,
     ),
+    # Claude 5.5 family (direct Anthropic API IDs; no date suffix) — the only
+    # Claude models the homelab deployment uses (owner policy 2026-10-08).
+    "claude-opus-5-5": ModelConfig(
+        provider=ModelProvider.ANTHROPIC,
+        name="claude-opus-5-5",
+        max_tokens=1000000,
+        embedding_dimensions=1536,
+    ),
+    "claude-sonnet-5-5": ModelConfig(
+        provider=ModelProvider.ANTHROPIC,
+        name="claude-sonnet-5-5",
+        max_tokens=1000000,
+        embedding_dimensions=1536,
+    ),
+    "claude-haiku-5-5": ModelConfig(
+        provider=ModelProvider.ANTHROPIC,
+        name="claude-haiku-5-5",
+        max_tokens=1000000,
+        embedding_dimensions=1536,
+    ),
     # Claude 4.5 family (direct Anthropic API IDs)
     "claude-sonnet-4-5-20250929": ModelConfig(
         provider=ModelProvider.ANTHROPIC,
@@ -354,12 +374,12 @@ class Settings(BaseSettings):
     openai_api_base: str | None = None
     anthropic_api_base: str | None = None
     # Homelab deployment sets these via run-local.sh; the fallback here matches
-    # the deployed GENERATION_MODEL (openai/gpt-4o-mini — cheap, fast, ~20x
-    # cheaper than Haiku) so the fork default never silently drifts onto a
-    # retired model (it referenced gpt-5* historically; aligned to the live
-    # deployed value, LAB-379) and memory operations still work if the env vars
+    # the deployed GENERATION_MODEL (anthropic/claude-haiku-5-5 since 2026-10-08 —
+    # owner policy: current-generation models only; $0.10/$0.50 per MTok undercuts
+    # the previous gpt-4o-mini) so the fork default never silently drifts onto a
+    # retired model (LAB-379) and memory operations still work if the env vars
     # fail to export.
-    generation_model: str = "openai/gpt-4o-mini"
+    generation_model: str = "anthropic/claude-haiku-5-5"
     embedding_model: str = "text-embedding-3-small"
 
     # Cloud
@@ -371,12 +391,10 @@ class Settings(BaseSettings):
     aws_secret_access_key: str | None = None
     aws_session_token: str | None = None
 
-    # Model selection for query optimization. fast_model matches the deployed
-    # FAST_MODEL (openai/gpt-4o-mini, LAB-379 — was gpt-5-mini historically);
-    # slow_model is the heavier complex-query model (deployed SLOW_MODEL is
-    # Claude Haiku 4.5 via run-local.sh — the env var overrides this default).
-    slow_model: str = "anthropic/claude-sonnet-4-6"
-    fast_model: str = "openai/gpt-4o-mini"
+    # Model selection for query optimization. Both match the deployed FAST_MODEL /
+    # SLOW_MODEL (anthropic/claude-haiku-5-5 via run-local.sh, 2026-10-08).
+    slow_model: str = "anthropic/claude-haiku-5-5"
+    fast_model: str = "anthropic/claude-haiku-5-5"
 
     # Model used for merging similar/duplicate memories during compaction.
     # Defaults to None, which resolves to generation_model at runtime.
