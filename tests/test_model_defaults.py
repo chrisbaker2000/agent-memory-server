@@ -15,11 +15,13 @@ Run: uv run pytest tests/test_model_defaults.py -v
 """
 
 import re
+from typing import get_args
 
 import pytest
 
 from agent_memory_server.config import MODEL_CONFIGS, Settings
 from agent_memory_server.llm.client import LLMClient
+from agent_memory_server.models import ModelNameLiteral
 
 
 DEPLOYED = "anthropic/claude-haiku-5-5"
@@ -49,3 +51,10 @@ def test_claude_5_5_family_has_model_configs(model_id):
 def test_unknown_model_falls_back_to_haiku_5_5():
     cfg = LLMClient.get_model_config("definitely-not-a-model")
     assert cfg.name == "claude-haiku-5-5"
+
+
+@pytest.mark.parametrize("model_id", ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"])
+def test_claude_5_5_ids_accepted_by_public_model_name_literal(model_id):
+    # REST/MCP `model_name` parameters are typed ModelNameLiteral; a config without a
+    # matching literal is unreachable for callers (codex #12 F1).
+    assert model_id in get_args(ModelNameLiteral)
