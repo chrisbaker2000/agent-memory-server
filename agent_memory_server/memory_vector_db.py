@@ -4,6 +4,7 @@ with a RedisVL-based implementation for Redis backends.
 """
 
 import logging
+import re
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
 from functools import reduce
@@ -46,6 +47,14 @@ from agent_memory_server.utils.redis_query import RecencyAggregationQuery
 
 
 logger = logging.getLogger(__name__)
+
+# RediSearch's default TEXT tokenizer separators (toksep.h DEFAULT_SEPARATORS):
+# whitespace plus these punctuation characters. Query terms must be split on the
+# same set as indexed text, or punctuation-joined tokens can never match.
+REDISEARCH_DEFAULT_SEPARATORS = ",./(){}[]:;\\~!@#$%^&*-=+|'`\"<>?"
+_REDISEARCH_SEPARATOR_RE = re.compile(
+    r"[\s" + re.escape(REDISEARCH_DEFAULT_SEPARATORS) + r"]+"
+)
 
 # --- Provenance & versioning sentinels (ported from wfr-memory-commons) ---
 # An UNSCORED memory (confidence is None) is stored with an above-range
@@ -685,6 +694,8 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         Raises:
             Exception: If Redis aggregation fails (caller should handle fallback)
         """
+        from agent_memory_server.config import settings
+
         # Embed the query text to vector
         embedding_vector = await self.embeddings.aembed_query(query)
 
@@ -703,6 +714,7 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
                 vector_field_name="vector",
                 filter_expression=redis_filter,
                 num_results=limit,
+                ef_runtime=settings.vector_search_ef_runtime,
             )
 
         # Aggregate with APPLY/SORTBY boosted score
@@ -835,11 +847,20 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
     def _escape_text_query(query: str) -> str:
         """Escape and tokenize a query string for FT.SEARCH text matching.
 
-        Splits the query into words, escapes Redis Search special characters
-        in each word, and joins with spaces (implicit AND in Redis Search).
+        Splits the query into terms the same way RediSearch's default tokenizer
+        splits the indexed document text (whitespace AND punctuation separators,
+        ``REDISEARCH_DEFAULT_SEPARATORS``), escapes any remaining Redis Search
+        special characters, and joins with spaces (implicit AND in Redis Search).
         AND logic ensures only documents matching ALL query terms contribute
         to the text search, preventing false positives from common words
         like "project" matching unrelated documents.
+
+        Why split on punctuation: the indexed text ``id=smoke-123`` is stored as
+        the terms ``id``, ``smoke``, ``123``. Escaping the query word instead
+        (``id\\=smoke\\-123``) asks for one literal term that can never exist,
+        which — under AND — zeroed the whole text leg for any query containing a
+        hyphenated name, email, URL or ``key=value`` token, removing the BM25
+        safety net exactly when the KNN leg also missed (open item 51).
 
         Documents matching all terms are precisely what we want for RRF
         fusion — they represent strong lexical matches. When no documents
@@ -851,15 +872,11 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
 
         Returns:
             Escaped query for Redis text field (e.g., "Time Capsule project"),
-            or empty string if no valid words remain.
+            or empty string if no valid terms remain.
         """
         escaper = TokenEscaper()
-        words = query.split()
-        if not words:
-            return ""
         escaped_words: list[str] = []
-        for word in words:
-            word = word.strip()
+        for word in _REDISEARCH_SEPARATOR_RE.split(query):
             if not word:
                 continue
             escaped = escaper.escape(word)
@@ -1142,12 +1159,16 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
                     return_fields=self.RETURN_FIELDS,
                 )
             else:
+                # Why ef_runtime: RediSearch's default HNSW EF_RUNTIME (10) is too
+                # small for this corpus — unfiltered KNN silently misses near-exact
+                # matches (see Settings.vector_search_ef_runtime).
                 vq = VectorQuery(
                     vector=embedding_vector,
                     vector_field_name="vector",
                     filter_expression=redis_filter,
                     num_results=fetch_count,
                     return_fields=self.RETURN_FIELDS,
+                    ef_runtime=settings.vector_search_ef_runtime,
                 )
 
             # Execute vector search

@@ -564,6 +564,18 @@ Optimized query:"""
         3  # Fetch N * limit results from each source
     )
 
+    # HNSW query-time candidate-list size (RediSearch EF_RUNTIME) for the KNN leg
+    # of search_memories(). RediSearch's default is 10 (effectively max(10, K)),
+    # which on the live ~22k-record index (and a graph churned by ~68k deletions)
+    # silently drops near-exact matches from unfiltered / weakly-filtered recall:
+    # measured 2026-10-08, querying a record's OWN stored vector missed it 2.3% of
+    # the time at K=15 (6.7% for freshly written outlier records) and 0% at 100,
+    # for ~+0.2 ms p50. Selective filters (namespace/user scoped) take RediSearch's
+    # brute-force path and were never affected. This was the root cause of the
+    # "read-after-write race" (open item 51): not a visibility lag, an ANN miss.
+    # None = use the RediSearch default.
+    vector_search_ef_runtime: int | None = Field(default=100, gt=0)
+
     # Search-query length clamp. A pathologically long recall query (e.g. a
     # whole pasted document) is clamped to this many characters at the search
     # entry point before embedding, so it degrades to a partial semantic search
