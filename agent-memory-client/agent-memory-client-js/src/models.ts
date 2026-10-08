@@ -36,7 +36,11 @@ export type ModelNameLiteral =
   | "claude-3-7-sonnet-latest"
   | "claude-3-5-sonnet-latest"
   | "claude-3-5-haiku-latest"
-  | "claude-3-opus-latest";
+  | "claude-3-opus-latest"
+  // Anthropic Claude 5.5 family (current generation; no date suffix)
+  | "claude-opus-5-5"
+  | "claude-sonnet-5-5"
+  | "claude-haiku-5-5";
 
 /**
  * Enum for memory types
