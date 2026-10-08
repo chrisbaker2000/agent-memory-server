@@ -694,6 +694,8 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         Raises:
             Exception: If Redis aggregation fails (caller should handle fallback)
         """
+        from agent_memory_server.config import settings
+
         # Embed the query text to vector
         embedding_vector = await self.embeddings.aembed_query(query)
 
@@ -712,6 +714,7 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
                 vector_field_name="vector",
                 filter_expression=redis_filter,
                 num_results=limit,
+                ef_runtime=settings.vector_search_ef_runtime,
             )
 
         # Aggregate with APPLY/SORTBY boosted score

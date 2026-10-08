@@ -139,3 +139,30 @@ class TestVectorLegEfRuntime:
             )
         vq = _queries_sent(db)[0]
         assert "EF_RUNTIME" not in vq.query_string()
+
+    @pytest.mark.asyncio
+    async def test_server_side_recency_knn_carries_ef_runtime(self):
+        # SearchRequest.server_side_recency routes to _search_with_recency_aggregation,
+        # which builds its own VectorQuery — it must use the same EF_RUNTIME.
+        from agent_memory_server.utils.redis_query import RecencyAggregationQuery
+
+        db = _make_db()
+        db._index.aggregate = AsyncMock(return_value=[])
+        captured = []
+        real = RecencyAggregationQuery.from_vector_query.__func__
+
+        def spy(cls, vq, **kwargs):
+            captured.append(vq)
+            return real(cls, vq, **kwargs)
+
+        with (
+            patch.object(settings, "vector_search_ef_runtime", 100),
+            patch.object(
+                RecencyAggregationQuery, "from_vector_query", classmethod(spy)
+            ),
+        ):
+            await db.search_memories(query="probe", server_side_recency=True, limit=5)
+        assert db._index.aggregate.await_count == 1
+        (vq,) = captured
+        assert "EF_RUNTIME $EF" in vq.query_string()
+        assert vq.params["EF"] == 100
