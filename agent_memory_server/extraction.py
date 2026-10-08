@@ -20,6 +20,7 @@ from agent_memory_server.models import VISIBILITY_RANK, MemoryRecord
 # (shared with memory_strategies.py without an import cycle); re-exported here for
 # the existing `from agent_memory_server.extraction import coerce_memory_type`
 # call sites and tests.
+from agent_memory_server.utils.llm_json import parse_llm_json_object
 from agent_memory_server.utils.memory_type import (
     VALID_MEMORY_TYPES as VALID_MEMORY_TYPES,  # re-export (tests, back-compat)
     coerce_memory_type,
@@ -558,7 +559,7 @@ Example: {{"entities": ["John Smith", "Apple Inc.", "New York"]}}
                 )
                 # Let JSONDecodeError propagate so tenacity retries.
                 # The old code caught it and returned [], preventing retries.
-                parsed = json.loads(response.content)
+                parsed = parse_llm_json_object(response.content)
                 entities = parsed.get("entities", [])
                 if not entities:
                     raise ValueError("LLM returned empty entities list")
@@ -602,7 +603,7 @@ Example: {{"topics": ["machine learning", "data science", "python"]}}
                     response_format={"type": "json_object"},
                 )
                 # Let JSONDecodeError propagate so tenacity retries.
-                parsed = json.loads(response.content)
+                parsed = parse_llm_json_object(response.content)
                 topics = parsed.get("topics", [])
                 if not topics:
                     raise ValueError("LLM returned empty topics list")

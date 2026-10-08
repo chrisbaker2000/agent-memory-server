@@ -185,6 +185,18 @@ Extracted memories:
 
 logger = logging.getLogger(__name__)
 
+
+class MemoryExtractionError(Exception):
+    """The extraction LLM call failed (exhausted retries, unparseable output, …).
+
+    Distinct from "the thread contained no memorable facts" (an empty list).
+    Callers must NOT mark the thread's messages as extracted on this error —
+    doing so silently discards every fact in them (2026-10-08: Haiku 5.5's
+    fenced JSON failed every parse and 22 threads were marked done with zero
+    memories).
+    """
+
+
 # Size guards — prevent mega-memory creation (added 2026-03-10)
 MAX_MEMORY_INPUT_CHARS = 500  # Skip merging memories larger than this
 MAX_MEMORY_OUTPUT_CHARS = 1000  # Cap merged output at this length
@@ -467,6 +479,9 @@ async def run_delayed_extraction(
         return len(extracted_memories)
 
     except Exception as e:
+        # Includes MemoryExtractionError: messages stay discrete_memory_extracted="f"
+        # (they are only flipped after a successful extraction above), so the next
+        # scheduled run re-extracts them instead of silently dropping their facts.
         logger.error(f"Error in trailing extraction for session {session_id}: {e}")
         # Clear the pending key to allow retry on next message
         await redis.delete(pending_key)
@@ -496,7 +511,12 @@ async def extract_memories_from_session_thread(
         visibility: Visibility scope to set on extracted memories (default: "everyone")
 
     Returns:
-        List of extracted memory records with proper contextual grounding
+        List of extracted memory records with proper contextual grounding.
+        An empty list means the LLM found nothing worth remembering.
+
+    Raises:
+        MemoryExtractionError: if the extraction LLM call fails. The caller must
+            leave the messages unextracted so a later run retries them.
     """
     from agent_memory_server.working_memory import get_working_memory
 
@@ -626,7 +646,9 @@ async def extract_memories_from_session_thread(
 
     except Exception as e:
         logger.error(f"Error extracting memories from session thread {session_id}: {e}")
-        return []
+        raise MemoryExtractionError(
+            f"memory extraction failed for session thread {session_id}"
+        ) from e
 
 
 async def extract_memory_structure(

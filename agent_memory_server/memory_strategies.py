@@ -18,6 +18,7 @@ from agent_memory_server.prompt_security import (
     validate_custom_prompt,
 )
 from agent_memory_server.telemetry import record_counter
+from agent_memory_server.utils.llm_json import parse_llm_json_object
 from agent_memory_server.utils.memory_type import (
     MEMORY_TYPE_PROMPT_CONSTRAINT,
     coerce_memory_type,
@@ -336,7 +337,7 @@ class DiscreteMemoryStrategy(BaseMemoryStrategy):
                     response_format={"type": "json_object"},
                 )
                 try:
-                    response_data = json.loads(response.content)
+                    response_data = parse_llm_json_object(response.content)
                     return response_data.get("memories", [])
                 except json.JSONDecodeError:
                     logger.error(f"Error decoding JSON: {response.content}")
@@ -445,7 +446,7 @@ class SummaryMemoryStrategy(BaseMemoryStrategy):
                     response_format={"type": "json_object"},
                 )
                 try:
-                    response_data = json.loads(response.content)
+                    response_data = parse_llm_json_object(response.content)
                     return response_data.get("memories", [])
                 except json.JSONDecodeError:
                     logger.error(f"Error decoding JSON: {response.content}")
@@ -556,7 +557,7 @@ class UserPreferencesMemoryStrategy(BaseMemoryStrategy):
                     response_format={"type": "json_object"},
                 )
                 try:
-                    response_data = json.loads(response.content)
+                    response_data = parse_llm_json_object(response.content)
                     return response_data.get("memories", [])
                 except json.JSONDecodeError:
                     logger.error(f"Error decoding JSON: {response.content}")
@@ -657,7 +658,7 @@ class CustomMemoryStrategy(BaseMemoryStrategy):
                     response_format={"type": "json_object"},
                 )
                 try:
-                    response_data = json.loads(response.content)
+                    response_data = parse_llm_json_object(response.content)
                     memories = response_data.get("memories", [])
 
                     # Filter and validate output memories for security
