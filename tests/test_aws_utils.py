@@ -97,7 +97,13 @@ class TestAWSUtilities:
         assert result is True
 
     def test_bedrock_embedding_model_exists_client_error(self):
-        """Test bedrock_embedding_model_exists returns False on ClientError."""
+        """A ClientError (e.g. AccessDenied) is logged and treated as "exists".
+
+        Deliberate since the fork's d38bd4b: this is a pre-check, not a gate, so
+        misconfigured credentials surface from the real embedding call instead of
+        as a misleading "model not found". (This test still asserted the old
+        False until 2026-10-09.)
+        """
         from botocore.exceptions import ClientError
 
         from agent_memory_server._aws.utils import bedrock_embedding_model_exists
@@ -111,16 +117,22 @@ class TestAWSUtilities:
             "ListFoundationModels",
         )
 
-        with patch(
-            "agent_memory_server._aws.utils.create_bedrock_client",
-            return_value=mock_client,
+        with (
+            patch(
+                "agent_memory_server._aws.utils.create_bedrock_client",
+                return_value=mock_client,
+            ),
+            patch("agent_memory_server._aws.utils.logger") as mock_logger,
         ):
             result = bedrock_embedding_model_exists(
                 "amazon.titan-embed-text-v2:0",
                 region_name="us-east-1",
             )
 
-        assert result is False
+        assert result is True
+        # The swallowed ClientError must be logged, not silent.
+        mock_logger.exception.assert_called_once()
+        assert "Defaulting to True" in mock_logger.exception.call_args.args[0]
 
     def test_bedrock_embedding_model_exists_caching(self):
         """Test that results are cached."""

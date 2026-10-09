@@ -135,7 +135,7 @@ class TestApiCommand:
         mock_on_start_logger.assert_called_once()
         mock_uvicorn_run.assert_called_once_with(
             "agent_memory_server.main:app",
-            host="0.0.0.0",
+            host="127.0.0.1",  # loopback default (LAB-64), not the wildcard
             port=8000,  # default from settings
             reload=False,
         )
@@ -183,7 +183,7 @@ class TestApiCommand:
         mock_on_start_logger.assert_called_once()
         mock_uvicorn_run.assert_called_once_with(
             "agent_memory_server.main:app",
-            host="0.0.0.0",
+            host="127.0.0.1",  # loopback default (LAB-64), not the wildcard
             port=8000,
             reload=False,
         )
