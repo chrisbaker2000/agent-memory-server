@@ -12,11 +12,8 @@ Covers:
   Finding #37: _deduplicate_entity_variants runs before entity cap
 """
 
-import json
 import logging
 import re
-from datetime import UTC, datetime
-from unittest import mock
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest

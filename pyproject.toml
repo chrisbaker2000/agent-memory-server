@@ -82,6 +82,9 @@ exclude = [
     "venv",
     ".venv",
     "*.egg-info",
+    # Upstream example notebook (upstream moved it to V0/); not fork code, left as-is
+    # so rebases stay clean.
+    "examples/*.ipynb",
 ]
 
 line-length = 88
@@ -172,3 +175,5 @@ examples = [
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]
+# Regression classes are named after review findings (TestFinding07_ParseListField...).
+"tests/**" = ["N801"]
