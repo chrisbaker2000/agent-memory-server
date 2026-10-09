@@ -697,15 +697,35 @@ class MockMemoryVectorDatabase(MemoryVectorDatabase):
         source_channel: Any = None,
         visibility: Any = None,
         stale_after: Any = None,
+        kind: Any = None,
+        min_confidence: Any = None,
         distance_threshold: float | None = None,
         server_side_recency: bool | None = None,
         recency_params: dict | None = None,
         limit: int = 10,
         offset: int = 0,
+        hybrid_search: bool = True,
     ) -> MemoryRecordResults:
-        """Search memories in the mock store."""
+        """Search memories in the mock store.
+
+        Must accept every parameter of MemoryVectorDatabase.search_memories
+        (tests/test_mock_vector_db_parity.py locks this): when LAB-397 added
+        `kind`/`min_confidence` here only, every test going through the mock
+        failed with "unexpected keyword argument".
+        """
         results = []
         for memory in list(self.memories.values()):
+            # LAB-397 recall filters, with the real index's semantics: `kind` is a
+            # TAG equality; `min_confidence` is an inclusive floor that UNSCORED
+            # records (confidence None) always pass.
+            if kind and getattr(kind, "eq", None) and memory.kind != kind.eq:
+                continue
+            if (
+                min_confidence is not None
+                and memory.confidence is not None
+                and memory.confidence < min_confidence.gte
+            ):
+                continue
             # Apply basic filters
             if (
                 namespace
