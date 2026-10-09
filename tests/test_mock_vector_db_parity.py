@@ -55,3 +55,33 @@ async def test_mock_honours_kind_and_min_confidence():
     floored = await db.search_memories("x", min_confidence=MinConfidence(gte=0.5))
     # Unscored (confidence None) always passes the floor.
     assert sorted(m.id for m in floored.memories) == ["e1", "f1"]
+
+
+@pytest.mark.asyncio
+async def test_mock_results_carry_provenance_fields():
+    """Codex on #16: the mock filtered on kind/confidence but dropped them (and the
+    other provenance fields) from its results, so API/MCP response-shape tests
+    could not see them. The real Redis path returns every one."""
+    from datetime import UTC, datetime
+
+    from agent_memory_server.models import MemoryRecord
+
+    valid_from = datetime(2026, 1, 1, tzinfo=UTC)
+    db = MockMemoryVectorDatabase()
+    await db.add_memories(
+        [
+            MemoryRecord(
+                id="p1",
+                text="a fact",
+                kind="fact",
+                confidence=0.75,
+                valid_from=valid_from,
+                superseded_by="p0",
+            )
+        ]
+    )
+    (hit,) = (await db.search_memories("x")).memories
+    assert hit.kind == "fact"
+    assert hit.confidence == 0.75
+    assert hit.valid_from == valid_from
+    assert hit.superseded_by == "p0"

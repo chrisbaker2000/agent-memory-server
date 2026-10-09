@@ -25,6 +25,8 @@ os.environ["VOCABULARY_PATH"] = str(
 # 2026-10-09 and only its password stopped them (test_memory_compaction calls
 # flushdb). A closed loopback port makes such paths fail fast instead.
 os.environ["REDIS_URL"] = "redis://127.0.0.1:1"
+# The imports below follow these assignments on purpose. Ruff's E402 exempts
+# `os.environ[...] = ...` statements before imports, so `ruff check` stays clean.
 from datetime import UTC, datetime
 from typing import Any
 from unittest import mock
@@ -785,27 +787,32 @@ class MockMemoryVectorDatabase(MemoryVectorDatabase):
             ):
                 continue
 
+            # Every field the result model shares with the stored record (kind,
+            # confidence, valid_from/valid_to, superseded_by, trust_level, …), as
+            # the real Redis path returns them, so API/MCP tests see the same
+            # response shape (Codex on #16). The explicit fields below then apply
+            # the defaults the real path applies.
+            shared = {
+                name: getattr(memory, name)
+                for name in MemoryRecordResult.model_fields
+                if name != "dist" and hasattr(memory, name)
+            }
             result = MemoryRecordResult(
-                id=memory.id,
-                text=memory.text,
-                dist=0.1,
-                created_at=memory.created_at or datetime.now(UTC),
-                updated_at=memory.updated_at or datetime.now(UTC),
-                last_accessed=memory.last_accessed or datetime.now(UTC),
-                user_id=memory.user_id,
-                session_id=memory.session_id,
-                namespace=memory.namespace,
-                topics=memory.topics or [],
-                entities=memory.entities or [],
-                memory_hash=memory.memory_hash or "",
-                memory_type=memory.memory_type.value
-                if hasattr(memory.memory_type, "value")
-                else str(memory.memory_type),
-                persisted_at=memory.persisted_at,
-                source_user=memory.source_user,
-                source_channel=memory.source_channel,
-                visibility=memory.visibility,
-                stale_after=memory.stale_after,
+                **{
+                    **shared,
+                    "id": memory.id,
+                    "text": memory.text,
+                    "dist": 0.1,
+                    "created_at": memory.created_at or datetime.now(UTC),
+                    "updated_at": memory.updated_at or datetime.now(UTC),
+                    "last_accessed": memory.last_accessed or datetime.now(UTC),
+                    "topics": memory.topics or [],
+                    "entities": memory.entities or [],
+                    "memory_hash": memory.memory_hash or "",
+                    "memory_type": memory.memory_type.value
+                    if hasattr(memory.memory_type, "value")
+                    else str(memory.memory_type),
+                }
             )
             results.append(result)
 
