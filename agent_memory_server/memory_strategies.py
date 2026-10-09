@@ -1,7 +1,6 @@
 """Memory extraction strategies for configurable long-term memory processing."""
 
 import json
-import os
 from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Any
@@ -9,7 +8,7 @@ from typing import Any
 from tenacity.asyncio import AsyncRetrying
 from tenacity.stop import stop_after_attempt
 
-from agent_memory_server.config import settings
+from agent_memory_server.config import family_registry_path, settings
 from agent_memory_server.llm import LLMClient
 from agent_memory_server.logging import get_logger
 from agent_memory_server.prompt_security import (
@@ -69,7 +68,7 @@ _ROLE_RELATION = {
 def _load_family_context() -> str:
     """Build a roster of known household people for the extraction prompt.
 
-    Read from ``~/.openclaw/family.json``. Cached after first load. Returns an
+    Read from the registry at ``settings.family_json_path``. Cached after first load. Returns an
     empty string if the registry is unavailable (extraction still works, just
     without the roster hint).
     """
@@ -77,7 +76,7 @@ def _load_family_context() -> str:
     if _FAMILY_CONTEXT_CACHE is not None:
         return _FAMILY_CONTEXT_CACHE
     lines: list[str] = []
-    path = os.path.expanduser("~/.openclaw/family.json")
+    path = family_registry_path()
     try:
         with open(path) as f:
             users = (json.load(f) or {}).get("users", {})
@@ -86,10 +85,13 @@ def _load_family_context() -> str:
             if not display:
                 continue
             role = u.get("role", "extended")
-            # Immediate Baker family carries the Baker surname; extended members
+            # Immediate family carries the household surname (registry
+            # `lastName`, default "Baker" like the other readers); extended members
             # may not, so use the first name alone to avoid asserting a wrong one.
             full = (
-                f"{display} Baker" if role in ("admin", "partner", "child") else display
+                f"{display} {u.get('lastName', 'Baker')}"
+                if role in ("admin", "partner", "child")
+                else display
             )
             lines.append(f"- {full} — {_ROLE_RELATION.get(role, 'known person')}")
     except Exception as exc:

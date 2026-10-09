@@ -1,6 +1,32 @@
 import contextlib
 import os
 import time
+from pathlib import Path
+
+
+# Tests never read live homelab state. The family registry
+# (~/.openclaw/family.json): every registry reader goes through
+# settings.family_json_path, so point it at a synthetic roster BEFORE
+# agent_memory_server.config builds `settings` (the imports below). Forced, not
+# setdefault: a developer shell exporting the real path must not leak live family
+# data into, or make results depend on, tests.
+os.environ["FAMILY_JSON_PATH"] = str(Path(__file__).parent / "fixtures" / "family.json")
+# Same for the topic vocabulary (~/.openclaw/config/memory-vocabulary.json is live
+# homelab config that also holds household names): a synthetic copy of the
+# controlled topics, so topic tests are deterministic on every host.
+os.environ["VOCABULARY_PATH"] = str(
+    Path(__file__).parent / "fixtures" / "memory-vocabulary.json"
+)
+# And Redis: the default settings.redis_url (redis://localhost:6379) is the LIVE
+# homelab Redis Stack holding production memories. Tests normally get a
+# testcontainer Redis (use_test_redis_connection patches settings.redis_url),
+# but when Docker is unavailable that fixture yields None and any code path that
+# still connects used the default: 109 tests reached the live server on
+# 2026-10-09 and only its password stopped them (test_memory_compaction calls
+# flushdb). A closed loopback port makes such paths fail fast instead.
+os.environ["REDIS_URL"] = "redis://127.0.0.1:1"
+# The imports below follow these assignments on purpose. Ruff's E402 exempts
+# `os.environ[...] = ...` statements before imports, so `ruff check` stays clean.
 from datetime import UTC, datetime
 from typing import Any
 from unittest import mock
@@ -673,15 +699,35 @@ class MockMemoryVectorDatabase(MemoryVectorDatabase):
         source_channel: Any = None,
         visibility: Any = None,
         stale_after: Any = None,
+        kind: Any = None,
+        min_confidence: Any = None,
         distance_threshold: float | None = None,
         server_side_recency: bool | None = None,
         recency_params: dict | None = None,
         limit: int = 10,
         offset: int = 0,
+        hybrid_search: bool = True,
     ) -> MemoryRecordResults:
-        """Search memories in the mock store."""
+        """Search memories in the mock store.
+
+        Must accept every parameter of MemoryVectorDatabase.search_memories
+        (tests/test_mock_vector_db_parity.py locks this): when LAB-397 added
+        `kind`/`min_confidence` here only, every test going through the mock
+        failed with "unexpected keyword argument".
+        """
         results = []
         for memory in list(self.memories.values()):
+            # LAB-397 recall filters, with the real index's semantics: `kind` is a
+            # TAG equality; `min_confidence` is an inclusive floor that UNSCORED
+            # records (confidence None) always pass.
+            if kind and getattr(kind, "eq", None) and memory.kind != kind.eq:
+                continue
+            if (
+                min_confidence is not None
+                and memory.confidence is not None
+                and memory.confidence < min_confidence.gte
+            ):
+                continue
             # Apply basic filters
             if (
                 namespace
@@ -741,27 +787,32 @@ class MockMemoryVectorDatabase(MemoryVectorDatabase):
             ):
                 continue
 
+            # Every field the result model shares with the stored record (kind,
+            # confidence, valid_from/valid_to, superseded_by, trust_level, …), as
+            # the real Redis path returns them, so API/MCP tests see the same
+            # response shape (Codex on #16). The explicit fields below then apply
+            # the defaults the real path applies.
+            shared = {
+                name: getattr(memory, name)
+                for name in MemoryRecordResult.model_fields
+                if name != "dist" and hasattr(memory, name)
+            }
             result = MemoryRecordResult(
-                id=memory.id,
-                text=memory.text,
-                dist=0.1,
-                created_at=memory.created_at or datetime.now(UTC),
-                updated_at=memory.updated_at or datetime.now(UTC),
-                last_accessed=memory.last_accessed or datetime.now(UTC),
-                user_id=memory.user_id,
-                session_id=memory.session_id,
-                namespace=memory.namespace,
-                topics=memory.topics or [],
-                entities=memory.entities or [],
-                memory_hash=memory.memory_hash or "",
-                memory_type=memory.memory_type.value
-                if hasattr(memory.memory_type, "value")
-                else str(memory.memory_type),
-                persisted_at=memory.persisted_at,
-                source_user=memory.source_user,
-                source_channel=memory.source_channel,
-                visibility=memory.visibility,
-                stale_after=memory.stale_after,
+                **{
+                    **shared,
+                    "id": memory.id,
+                    "text": memory.text,
+                    "dist": 0.1,
+                    "created_at": memory.created_at or datetime.now(UTC),
+                    "updated_at": memory.updated_at or datetime.now(UTC),
+                    "last_accessed": memory.last_accessed or datetime.now(UTC),
+                    "topics": memory.topics or [],
+                    "entities": memory.entities or [],
+                    "memory_hash": memory.memory_hash or "",
+                    "memory_type": memory.memory_type.value
+                    if hasattr(memory.memory_type, "value")
+                    else str(memory.memory_type),
+                }
             )
             results.append(result)
 

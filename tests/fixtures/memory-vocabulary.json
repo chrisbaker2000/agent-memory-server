@@ -1,0 +1,22 @@
+{
+  "_comment": "Synthetic test vocabulary (tests/conftest.py sets VOCABULARY_PATH). Same controlled topics as the deployed vocabulary; generic synonyms only — no household names.",
+  "controlled_topics": [
+    "family", "health", "education", "heritage", "home", "food", "travel",
+    "entertainment", "sports", "media", "collecting", "work", "finances",
+    "openclaw", "infrastructure", "analytics", "devices", "networking",
+    "monitoring", "ai", "communication", "documents", "security", "personal",
+    "ephemeral"
+  ],
+  "topic_map": {
+    "ai tools": "ai",
+    "machine learning": "ai",
+    "llm": "ai",
+    "rowing": "sports",
+    "basketball": "sports",
+    "budget": "finances",
+    "school": "education",
+    "homework": "education",
+    "email": "communication",
+    "server": "infrastructure"
+  }
+}

@@ -12,7 +12,7 @@ from docket.dependencies import Perpetual
 from redis.asyncio import Redis
 from ulid import ULID
 
-from agent_memory_server.config import settings
+from agent_memory_server.config import family_registry_path, settings
 from agent_memory_server.dependencies import get_background_tasks
 from agent_memory_server.extraction import (
     _resolve_parent_attribution,
@@ -1497,7 +1497,7 @@ def _as_of_timestamp(as_of: datetime) -> float:
 
 
 # Source user normalization — maps slugified names back to full names.
-# The family registry at ~/.openclaw/family.json is the authoritative source.
+# The family registry (settings.family_json_path) is the authoritative source.
 # Falls back to title-casing the slug if the registry isn't available.
 _FAMILY_NAME_MAP: dict[str, str] | None = None
 
@@ -1520,9 +1520,8 @@ def _normalize_source_user(source_user: str) -> str:
         _FAMILY_NAME_MAP = {}
         try:
             import json
-            import os
 
-            family_path = os.path.expanduser("~/.openclaw/family.json")
+            family_path = family_registry_path()
             with open(family_path) as f:
                 family = json.load(f)
             # family.json: {"users": {"chris": {"displayName": "Chris", ...}, ...}}
@@ -1542,8 +1541,14 @@ def _normalize_source_user(source_user: str) -> str:
                     _FAMILY_NAME_MAP[full_name.lower().replace(" ", "")] = (
                         full_name  # "chrisbaker"
                     )
-        except Exception:
-            pass  # No family registry — fall back to title-case
+        except Exception as exc:
+            # No usable registry: fall back to title-case. Logged (once: the empty
+            # map is cached) so a moved or corrupt registry is visible.
+            logger.warning(
+                "family registry unavailable for source_user normalization (%s); "
+                "using slug title-casing",
+                exc,
+            )
 
     # Exact match in map
     lower = source_user.lower().strip()

@@ -294,13 +294,8 @@ class TestResolveUserDisplayName:
         assert resolve_user_display_name("system") == "User"
 
     def test_known_user_from_family_json(self):
-        """Known user resolves via family registry (if family.json is present)."""
-        # This test verifies the lookup path. If family.json is not available
-        # (e.g. in CI), the function falls back to title-casing.
-        result = resolve_user_display_name("chris")
-        # Either "Chris" (family registry) or "Chris" (title-case fallback)
-        assert result[0].isupper()
-        assert "chris" not in result  # Must not return the raw ID
+        """Known user resolves via the (synthetic, conftest-wired) family registry."""
+        assert resolve_user_display_name("alex") == "Alex Example"
 
     def test_unknown_user_title_cases(self):
         """Unknown source_user is title-cased as fallback."""
@@ -323,47 +318,37 @@ class TestResolveUserFromSessionId:
         assert resolve_user_from_session_id("") is None
 
     def test_no_direct_or_dm_scope(self):
-        """Session key without 'direct' or 'dm' scope returns None."""
+        """A group session has no single speaker: no attribution."""
         assert resolve_user_from_session_id("agent:main:discord:group:12345") is None
 
     def test_unknown_peer_id(self):
-        """Unknown peer ID returns None."""
+        """Unknown peer ID returns None (was the owner, via the "main" agent id)."""
         assert resolve_user_from_session_id("agent:main:discord:direct:999999999") is None
 
-    def test_discord_direct_chris(self):
-        """Discord direct session with Chris's ID resolves to 'chris'."""
-        # Only works if family.json is present with Chris's Discord ID
-        result = resolve_user_from_session_id(
-            "agent:main:discord:direct:773316001147256832"
+    def test_discord_direct_known_peer(self):
+        """Discord direct session with a registered Discord ID resolves to its user."""
+        assert (
+            resolve_user_from_session_id("agent:main:discord:direct:100000000000000002")
+            == "sam"
         )
-        if result is not None:  # Skip if family.json not available in test env
-            assert result == "chris"
 
-    def test_slack_dm_chris(self):
-        """Slack DM session with Chris's Slack ID resolves to 'chris'."""
-        result = resolve_user_from_session_id(
-            "agent:main:slack:dm:U06ESR1MPFG"
-        )
-        if result is not None:
-            assert result == "chris"
+    def test_slack_dm_known_peer(self):
+        """Slack DM session with a registered Slack ID resolves to its user."""
+        assert resolve_user_from_session_id("agent:main:slack:dm:UTESTADMIN1") == "alex"
 
     def test_case_insensitive(self):
         """Session key matching is case-insensitive."""
-        result = resolve_user_from_session_id(
-            "Agent:Main:Discord:Direct:773316001147256832"
+        assert (
+            resolve_user_from_session_id("Agent:Main:Discord:Direct:100000000000000003")
+            == "riley"
         )
-        if result is not None:
-            assert result == "chris"
 
     def test_full_name_resolution_chain(self):
         """resolve_user_from_session_id → resolve_user_display_name produces full name."""
         user_id = resolve_user_from_session_id(
-            "agent:main:discord:direct:773316001147256832"
+            "agent:main:discord:direct:100000000000000002"
         )
-        if user_id is not None:
-            display_name = resolve_user_display_name(user_id)
-            assert "Chris" in display_name
-            assert display_name != "User"
+        assert resolve_user_display_name(user_id) == "Sam Example"
 
 
 class TestSourceUserNameInPrompts:
