@@ -2364,11 +2364,20 @@ async def deduplicate_by_hash(
         if existing_memory.id:
             # Use the memory key format to update last_accessed
             existing_key = Keys.memory_key(existing_memory.id)
-            await update_memory_if_present(
+            touched = await update_memory_if_present(
                 redis_client,
                 existing_key,
                 {"last_accessed": str(int(datetime.now(UTC).timestamp()))},
             )
+            if not touched:
+                # The hit was deleted between the search and this touch: it is not a
+                # live duplicate. Index the new memory instead of dropping it, or the
+                # write would be lost with no copy left.
+                logger.info(
+                    "Hash-duplicate %s vanished before dedup; keeping the new memory",
+                    existing_memory.id,
+                )
+                return memory, False
 
             # Don't save this memory, it's a duplicate
             return None, True

@@ -17,12 +17,13 @@ its `text`. fakeredis runs the Lua (lupa), so these tests are hermetic.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import fakeredis
 import pytest
 
 from agent_memory_server.long_term_memory import (
+    deduplicate_by_hash,
     extract_memory_structure,
     update_last_accessed,
     update_memory_if_present,
@@ -159,3 +160,61 @@ async def test_update_last_accessed_skips_missing_and_counts_only_live(redis):
     )
     stored = await redis.hgetall(live)
     assert stored[b"access_count"] == b"1" and b"last_accessed" in stored
+
+
+# --- dedup: a hit deleted before the touch is not a duplicate (Codex BLOCKER on #14) -----
+
+
+def _dedup_adapter(hit_id: str):
+    from datetime import UTC, datetime
+
+    from agent_memory_server.models import (
+        MemoryRecordResult,
+        MemoryRecordResults,
+        MemoryTypeEnum,
+    )
+
+    hit = MemoryRecordResult(
+        id=hit_id,
+        text="Chris likes tea",
+        dist=0.0,
+        memory_type=MemoryTypeEnum.SEMANTIC,
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+        last_accessed=datetime.now(UTC),
+    )
+    adapter = MagicMock()
+    adapter.list_memories = AsyncMock(
+        return_value=MemoryRecordResults(total=1, memories=[hit])
+    )
+    return adapter
+
+
+@pytest.mark.asyncio
+async def test_dedup_live_hit_is_a_duplicate_and_is_touched(redis):
+    key = await _live_memory(redis, "dup-live")
+    new = MemoryRecord(id="new-1", text="Chris likes tea")
+    with patch(
+        "agent_memory_server.long_term_memory.get_memory_vector_db",
+        return_value=_dedup_adapter("dup-live"),
+    ):
+        result, is_dup = await deduplicate_by_hash(new, redis_client=redis)
+    assert (result, is_dup) == (None, True)
+    assert b"last_accessed" in await redis.hgetall(key)
+
+
+@pytest.mark.asyncio
+async def test_dedup_hit_deleted_before_touch_keeps_the_new_memory(redis):
+    # The search returned a hit whose hash was deleted before the touch: treating the new
+    # memory as its duplicate would drop it with no live copy left (silent write loss).
+    new = MemoryRecord(id="new-2", text="Chris likes tea")
+    with patch(
+        "agent_memory_server.long_term_memory.get_memory_vector_db",
+        return_value=_dedup_adapter("dup-gone"),
+    ):
+        result, is_dup = await deduplicate_by_hash(new, redis_client=redis)
+    assert is_dup is False
+    assert result is new
+    assert await redis.exists(Keys.memory_key("dup-gone")) == 0, (
+        "and the deleted hit is not recreated"
+    )
