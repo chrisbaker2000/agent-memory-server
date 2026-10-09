@@ -48,6 +48,14 @@ from agent_memory_server.utils.redis_query import RecencyAggregationQuery
 
 logger = logging.getLogger(__name__)
 
+# Default for missing/corrupt record timestamps: visibly stale, so recency scoring
+# never boosts them and compaction never treats them as "just created".
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+# Upper bound for the FT.SEARCH fetch window (limit + offset, times the hybrid
+# multiplier); search_memories clamps to it.
+REDIS_SEARCH_LIMIT_CAP = 10000
+
 # RediSearch's default TEXT tokenizer separators (toksep.h DEFAULT_SEPARATORS):
 # whitespace plus these punctuation characters. Query terms must be split on the
 # same set as indexed text, or punctuation-joined tokens can never match.
@@ -563,7 +571,6 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         # Provide defaults for required fields. Use epoch (not now()) so
         # corrupt/missing timestamps are visibly stale and don't get boosted
         # by recency scoring or survive compaction as "just created".
-        _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
         if not created_at:
             created_at = _EPOCH
         if not last_accessed:
@@ -1128,7 +1135,6 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
             # offset can push fetch_count past this limit. Clamp to 10,000 and
             # disable hybrid search for the request if even the base count exceeds
             # the cap (hybrid needs the multiplier headroom for good fusion).
-            REDIS_SEARCH_LIMIT_CAP = 10000
             if use_hybrid:
                 fetch_count = (
                     limit + offset

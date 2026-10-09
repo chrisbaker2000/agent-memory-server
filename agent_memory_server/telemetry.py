@@ -34,6 +34,7 @@ import threading
 import time
 from typing import Any
 
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -322,7 +323,9 @@ def start() -> None:
     except Exception as e:
         logger.debug("Failed to create httpx client: %s", e)
         _client = None
-    _flush_thread = threading.Thread(target=_flush_loop, daemon=True, name="telemetry-flush")
+    _flush_thread = threading.Thread(
+        target=_flush_loop, daemon=True, name="telemetry-flush"
+    )
     _flush_thread.start()
     logger.info("Memory server telemetry started (endpoint: %s)", OTLP_ENDPOINT)
 
@@ -345,8 +348,10 @@ def stop() -> None:
     if _client is not None:
         try:
             _client.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            # Shutdown path: a failed close must not abort shutdown, but it is
+            # logged rather than swallowed.
+            logger.warning("Memory server telemetry client close failed: %s", exc)
         _client = None
     logger.info("Memory server telemetry stopped")
 
@@ -354,6 +359,7 @@ def stop() -> None:
 # ---------------------------------------------------------------------------
 # Instrumentation decorators / context managers
 # ---------------------------------------------------------------------------
+
 
 class Timer:
     """Simple context manager for timing operations."""

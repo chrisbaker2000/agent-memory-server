@@ -235,7 +235,11 @@ class LiteLLMEmbeddings:
 
         kwargs = self._build_call_kwargs(prefixed_texts)
 
-        from agent_memory_server.telemetry import Timer, record_counter, record_histogram
+        from agent_memory_server.telemetry import (
+            Timer,
+            record_counter,
+            record_histogram,
+        )
 
         with Timer() as t:
             response = await aembedding(**kwargs)
@@ -269,7 +273,11 @@ class LiteLLMEmbeddings:
         prefixed = self._apply_nomic_prefix([text], task="query")
         kwargs = self._build_call_kwargs(prefixed)
 
-        from agent_memory_server.telemetry import Timer, record_counter, record_histogram
+        from agent_memory_server.telemetry import (
+            Timer,
+            record_counter,
+            record_histogram,
+        )
 
         with Timer() as t:
             response = await aembedding(**kwargs)
