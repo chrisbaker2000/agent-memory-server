@@ -10,7 +10,7 @@ from tenacity.asyncio import AsyncRetrying
 from tenacity.stop import stop_after_attempt
 
 # Lazy-import transformers in get_ner_model to avoid heavy deps at startup
-from agent_memory_server.config import settings
+from agent_memory_server.config import family_registry_path, settings
 from agent_memory_server.filters import DiscreteMemoryExtracted, MemoryType
 from agent_memory_server.llm import LLMClient
 from agent_memory_server.logging import get_logger
@@ -148,16 +148,17 @@ _vocab = _load_vocabulary()
 # ============================================================================
 
 
-def _load_family_registry() -> tuple[dict[str, str], dict[str, str]]:
-    """Load family registry and build two lookup maps.
+def _load_family_registry() -> tuple[dict[str, str], dict[str, str], str | None]:
+    """Load family registry and build two lookup maps plus the owner id.
 
     Returns:
         Tuple of:
         - name_map: source_user → full display name (e.g. {"chris": "Chris Baker"})
-        - identity_map: platform_id → source_user (e.g. {"773316001147256832": "chris"})
-    Falls back to empty dicts if the file is missing (e.g. in tests).
+        - identity_map: platform_id → source_user (e.g. {"<discord id>": "chris"})
+        - admin_user: the registry's ``adminUser`` (the gateway owner), or None
+    Falls back to empty maps and no owner if the file is missing or unreadable.
     """
-    family_path = os.path.expanduser(settings.family_json_path)
+    family_path = family_registry_path()
     try:
         with open(family_path) as f:
             data = json.load(f)
@@ -179,29 +180,31 @@ def _load_family_registry() -> tuple[dict[str, str], dict[str, str]]:
                         normalized = platform_id.lower().lstrip("+")
                         identity_map[normalized] = user_id
                         identity_map[platform_id.lower()] = user_id
+            admin = data.get("adminUser")
+            admin_user = admin if isinstance(admin, str) and admin in users else None
             logger.info(
                 "Loaded family registry from %s: %d users, %d identities",
                 family_path,
                 len(name_map),
                 len(identity_map),
             )
-            return name_map, identity_map
+            return name_map, identity_map, admin_user
     except FileNotFoundError:
         logger.info(
             "Family registry not found at %s, will use source_user IDs as-is",
             family_path,
         )
-        return {}, {}
+        return {}, {}, None
     except (json.JSONDecodeError, KeyError) as e:
         logger.error(
             "Error loading family registry from %s: %s",
             family_path,
             e,
         )
-        return {}, {}
+        return {}, {}, None
 
 
-_family_names, _family_identities = _load_family_registry()
+_family_names, _family_identities, _family_admin_user = _load_family_registry()
 
 
 def resolve_user_display_name(source_user: str | None) -> str:
@@ -263,19 +266,19 @@ def resolve_user_from_session_id(session_id: str | None) -> str | None:
         except ValueError:
             continue
 
-    # Fallback: channel/group sessions (e.g., "agent:main:discord:channel:123456")
-    # These don't have a user peer ID. Default to "chris" since he is the primary
-    # user in channel conversations. This prevents empty source_user and "[User]"
-    # labels in extraction prompts.
-    if "channel" in parts:
-        return "chris"
+    # Owner sessions. Only the segments AFTER "agent:<agentId>:" describe the
+    # session: the agent id itself is "main" on this gateway, so testing
+    # `"main" in parts` (the old check) matched EVERY key and attributed unknown
+    # DM peers and group conversations to the owner.
+    #   agent:main:main                  local gateway session
+    #   agent:main:hook:email:           system hook session
+    #   agent:main:discord:channel:<id>  channel (owner-run; no per-user peer id)
+    session = parts[2:] if len(parts) >= 3 and parts[0] == "agent" else parts
+    if session and (session[0] in ("main", "hook") or "channel" in session):
+        return _family_admin_user
 
-    # Fallback: local/main sessions (e.g., "agent:main:main") and system sessions
-    # (e.g., "agent:main:hook:email:"). These have no peer ID or channel scope.
-    # Default to "chris" — the primary (and only direct) user of the local gateway.
-    if "main" in parts or "hook" in parts:
-        return "chris"
-
+    # Unknown DM peer, group conversation, anything else: no attribution rather
+    # than a wrong one.
     return None
 
 

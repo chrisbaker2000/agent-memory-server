@@ -1,0 +1,42 @@
+{
+  "users": {
+    "alex": {
+      "displayName": "Alex",
+      "lastName": "Example",
+      "role": "admin",
+      "identities": {
+        "discord": "100000000000000001",
+        "slack": "UTESTADMIN1",
+        "whatsapp": "+15550100001",
+        "email": "alex@example.test"
+      }
+    },
+    "sam": {
+      "displayName": "Sam",
+      "lastName": "Example",
+      "role": "partner",
+      "identities": { "discord": "100000000000000002" }
+    },
+    "riley": {
+      "displayName": "Riley",
+      "lastName": "Example",
+      "role": "child",
+      "identities": { "discord": "100000000000000003" }
+    },
+    "jordan": {
+      "displayName": "Jordan",
+      "lastName": "Example",
+      "role": "child",
+      "identities": {}
+    },
+    "casey": {
+      "displayName": "Casey",
+      "lastName": "Other",
+      "role": "extended",
+      "identities": {}
+    }
+  },
+  "adminUser": "alex",
+  "defaultVisibility": "family",
+  "unknownUserPolicy": "restricted"
+}

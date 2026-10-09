@@ -35,18 +35,19 @@ _DT = datetime(2026, 6, 20).strftime("%A, %B %d, %Y")
 
 
 def test_family_context_lists_children_and_spouse():
+    # Synthetic registry (tests/fixtures/family.json via conftest), never the
+    # live ~/.openclaw/family.json: this used to pass only on the homelab host.
     roster = _load_family_context()
-    # Depends on ~/.openclaw/family.json being present on this host.
-    assert "Christian Baker" in roster
-    assert "Lindsey Baker" in roster
-    assert "Lindalee Baker" in roster
-    assert "speaker's child" in roster
-    assert "speaker's spouse" in roster
+    assert "- Sam Example — the speaker's spouse" in roster
+    assert "- Riley Example — the speaker's child" in roster
+    assert "- Jordan Example — the speaker's child" in roster
+    # Extended family: first name only (surname not asserted).
+    assert "- Casey — extended family" in roster
 
 
 def test_family_context_marks_speaker_distinctly():
     roster = _load_family_context()
-    assert "Chris Baker — the application user / primary speaker" in roster
+    assert "- Alex Example — the application user / primary speaker" in roster
 
 
 # --- prompt structure: roster placeholder present --------------------------
@@ -88,8 +89,9 @@ def test_discrete_prompt_formats():
         family_context=_load_family_context(),
         memory_type_constraint=MEMORY_TYPE_PROMPT_CONSTRAINT,
     )
-    assert "Christian Baker is a lightweight rower" in out
-    assert "Chris Baker — the application user" in out
+    assert "Christian Baker is a lightweight rower" in out  # static prompt example
+    # Roster line from the synthetic registry (tests/fixtures/family.json).
+    assert "Alex Example — the application user" in out
 
 
 def test_summary_prompt_formats():
@@ -129,9 +131,7 @@ def test_family_context_fails_loud_when_roster_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(
         ms, "record_counter", lambda name, **kw: calls.append((name, kw))
     )
-    monkeypatch.setattr(
-        ms.os.path, "expanduser", lambda _p: str(tmp_path / "nope.json")
-    )
+    monkeypatch.setattr(ms.settings, "family_json_path", str(tmp_path / "nope.json"))
     monkeypatch.setattr(ms, "_FAMILY_CONTEXT_CACHE", None)
 
     assert ms._load_family_context() == ""
@@ -153,7 +153,7 @@ def test_family_context_fails_loud_when_roster_empty(tmp_path, monkeypatch):
     monkeypatch.setattr(
         ms, "record_counter", lambda name, **kw: calls.append((name, kw))
     )
-    monkeypatch.setattr(ms.os.path, "expanduser", lambda _p: str(roster_file))
+    monkeypatch.setattr(ms.settings, "family_json_path", str(roster_file))
     monkeypatch.setattr(ms, "_FAMILY_CONTEXT_CACHE", None)
 
     assert ms._load_family_context() == ""
@@ -247,9 +247,7 @@ def test_custom_strategy_preserves_fail_loud_when_roster_missing(tmp_path, monke
     monkeypatch.setattr(
         ms, "record_counter", lambda name, **kw: calls.append((name, kw))
     )
-    monkeypatch.setattr(
-        ms.os.path, "expanduser", lambda _p: str(tmp_path / "nope.json")
-    )
+    monkeypatch.setattr(ms.settings, "family_json_path", str(tmp_path / "nope.json"))
     monkeypatch.setattr(ms, "_FAMILY_CONTEXT_CACHE", None)
 
     sent = _capture_custom_prompt(

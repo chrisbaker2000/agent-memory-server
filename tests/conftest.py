@@ -1,6 +1,22 @@
 import contextlib
 import os
 import time
+from pathlib import Path
+
+
+# Tests never read live homelab state. The family registry
+# (~/.openclaw/family.json): every registry reader goes through
+# settings.family_json_path, so point it at a synthetic roster BEFORE
+# agent_memory_server.config builds `settings` (the imports below). Forced, not
+# setdefault: a developer shell exporting the real path must not leak live family
+# data into, or make results depend on, tests.
+os.environ["FAMILY_JSON_PATH"] = str(Path(__file__).parent / "fixtures" / "family.json")
+# Same for the topic vocabulary (~/.openclaw/config/memory-vocabulary.json is live
+# homelab config that also holds household names): a synthetic copy of the
+# controlled topics, so topic tests are deterministic on every host.
+os.environ["VOCABULARY_PATH"] = str(
+    Path(__file__).parent / "fixtures" / "memory-vocabulary.json"
+)
 from datetime import UTC, datetime
 from typing import Any
 from unittest import mock

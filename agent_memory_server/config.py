@@ -813,6 +813,16 @@ New summary:
 settings = Settings()
 
 
+def family_registry_path() -> str:
+    """The family registry file every reader uses: ``settings.family_json_path``, ``~`` expanded.
+
+    Why one helper: two of the three registry readers used to hardcode
+    ``~/.openclaw/family.json`` and ignore the setting, so a configured path (and
+    the test suite's synthetic roster) only reached one of them.
+    """
+    return os.path.expanduser(settings.family_json_path)
+
+
 def get_config():
     """Get configuration from environment and settings files."""
     config_data = {}
