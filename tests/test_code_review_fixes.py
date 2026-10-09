@@ -11,12 +11,9 @@ Memory server fork findings:
 """
 
 import json
-import logging
 import re
 import threading
 import time
-from datetime import UTC, datetime
-from unittest import mock
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -114,12 +111,7 @@ class TestFinding03_TelemetryLockDuringHTTP:
             telemetry.TELEMETRY_ENABLED = True
             client_instances = []
 
-            original_client_cls = None
-            try:
-                import httpx
-                original_client_cls = httpx.Client
-            except ImportError:
-                pytest.skip("httpx not installed")
+            pytest.importorskip("httpx")
 
             def tracking_client(*args, **kwargs):
                 instance = MagicMock()
@@ -165,7 +157,7 @@ class TestFinding22_EnforceTopicsNonDeterminism:
     def test_ambiguous_topic_matches_consistently(self):
         """A topic containing multiple controlled-topic substrings should
         produce deterministic results regardless of set iteration order."""
-        from agent_memory_server.extraction import enforce_topics, CONTROLLED_TOPICS
+        from agent_memory_server.extraction import CONTROLLED_TOPICS, enforce_topics
 
         # Find two controlled topics where one is a substring of a compound
         # word — this is the class of inputs that's non-deterministic
@@ -353,17 +345,17 @@ class TestFinding21_PatchCantClearFields:
     def test_explicit_sentinel_would_distinguish_missing_from_null(self):
         """Using UNSET sentinel would let us distinguish 'not provided'
         from 'explicitly set to null'."""
-        _UNSET = object()
+        _unset = object()
 
         # With sentinel pattern
         updates = {
             "text": "Updated text",
             "stale_after": None,  # Explicitly null → should clear
-            "visibility": _UNSET,  # Not provided → should not change
+            "visibility": _unset,  # Not provided → should not change
         }
 
         # Filter out only UNSET, keep None
-        filtered = {k: v for k, v in updates.items() if v is not _UNSET}
+        filtered = {k: v for k, v in updates.items() if v is not _unset}
 
         assert "stale_after" in filtered  # Kept (explicit null)
         assert filtered["stale_after"] is None
@@ -437,7 +429,7 @@ class TestFinding10_ExtractionMarksProcessedOnFailure:
                         setattr(copy, k, v)
                 return copy
 
-        MAX_EXTRACT_ATTEMPTS = 3
+        max_extract_attempts = 3
         memory = MockMemory("mem-1", "Grant loves basketball", extract_attempts=0)
         all_updated_memories = []
 
@@ -446,7 +438,7 @@ class TestFinding10_ExtractionMarksProcessedOnFailure:
             raise RuntimeError("LLM temporarily unavailable")
         except Exception:
             attempts = memory.extract_attempts + 1
-            if attempts >= MAX_EXTRACT_ATTEMPTS:
+            if attempts >= max_extract_attempts:
                 # Give up after max retries
                 updated = memory.model_copy(update={
                     "discrete_memory_extracted": "t",

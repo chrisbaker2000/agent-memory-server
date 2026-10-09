@@ -1486,9 +1486,8 @@ def _within_validity_window(m: MemoryRecordResult, as_of_ts: float) -> bool:
     """
     if m.valid_from is not None and as_of_ts < _utc_timestamp(m.valid_from):
         return False  # not yet valid at as_of
-    if m.valid_to is not None and as_of_ts >= _utc_timestamp(m.valid_to):
-        return False  # validity ended at/before as_of
-    return True
+    # Open-ended (valid_to None) is always current; otherwise end-exclusive.
+    return m.valid_to is None or as_of_ts < _utc_timestamp(m.valid_to)
 
 
 def _as_of_timestamp(as_of: datetime) -> float:

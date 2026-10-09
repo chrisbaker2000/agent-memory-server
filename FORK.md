@@ -122,6 +122,15 @@ A fork of [redis/agent-memory-server](https://github.com/redis/agent-memory-serv
 
     All three use one atomic Lua script, `update_memory_if_present()` / `_UPDATE_IF_PRESENT_LUA`. It writes only while the hash still has `text`, never creates the key, and returns whether it wrote. `update_last_accessed` keeps its batching (`EVAL` in a pipeline) and counts only records written. `deduplicate_by_hash` treats a hit that vanished before the touch as **not** a duplicate and keeps the new memory; otherwise the write would be lost with no copy left (codex F1). Upstream rebase note: route any new post-hoc write to a `memory_idx:` hash through `update_memory_if_present`.
 
+36. **Lint clean (`ruff check .` = 0)** (`pyproject.toml`, `long_term_memory.py`, `memory_vector_db.py`, `telemetry.py`, imports in `llm/embeddings.py` + `utils/relevance.py`, fork-added tests) — 2026-10-09. There were 66 findings. The behaviour-neutral fixes:
+    - `_is_valid_at` returns its end-bound condition directly (SIM103).
+    - `_EPOCH` and `REDIS_SEARCH_LIMIT_CAP` are module constants instead of function locals (N806).
+    - Imports are sorted.
+    - Telemetry shutdown logs a failed HTTP-client close instead of `except: pass`.
+    - `tests/test_memory_vector_db.py`'s offset-clamp test now asserts the clamped `num_results` (10000). Before, it only counted calls, so removing the clamp went unnoticed.
+
+    `pyproject.toml` ignores N801 under `tests/**`: the regression classes are named after review findings (`TestFinding07_…`). It also excludes `examples/*.ipynb`, which is upstream content that upstream has since moved to `V0/`. Upstream rebase note: keep both config lines.
+
 ### Test Coverage
 
 - `tests/test_no_ghost_memory_writes.py` — 9 tests (entry 35). Hermetic: fakeredis + lupa run the Lua. They cover the helper on live, missing and `text`-less hashes plus increments; each writer against a deleted memory; and dedup of a live hit (touched, dropped) vs a vanished hit (new memory kept). Removing the `HEXISTS` guard fails 5 of them.

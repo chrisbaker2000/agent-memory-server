@@ -19,8 +19,6 @@ from agent_memory_server.models import (
     MemoryRecordResults,
     MemoryTypeEnum,
 )
-
-
 from tests.conftest import MockEmbeddings
 
 
@@ -927,7 +925,7 @@ class TestHybridSearch:
             mock_settings.hybrid_search_enabled = False  # Config disabled
             mock_settings.vector_search_ef_runtime = 100
 
-            results = await db.search_memories(
+            await db.search_memories(
                 query="test query",
                 hybrid_search=True,  # Param enabled but config overrides
                 limit=10,
@@ -1104,7 +1102,7 @@ class TestHybridSearch:
             mock_settings.hybrid_search_rrf_k = 60
             mock_settings.hybrid_search_text_results_multiplier = 3
 
-            results = await db.search_memories(
+            await db.search_memories(
                 query="test query",
                 hybrid_search=True,
                 limit=100,
@@ -1131,15 +1129,17 @@ class TestHybridSearch:
             mock_settings.hybrid_search_text_results_multiplier = 3
 
             # offset=9995, limit=100 -> base fetch_count=10095 > 10000
-            results = await db.search_memories(
+            await db.search_memories(
                 query="test query",
                 hybrid_search=False,
                 limit=100,
                 offset=9995,
             )
 
-        # Should succeed without Redis LIMIT error (clamped to 10000)
+        # Should succeed without Redis LIMIT error: the query asks for the cap,
+        # not offset + limit (this assertion was missing; the test only counted calls)
         assert db._index.query.call_count == 1
+        assert db._index.query.call_args.args[0]._num_results == 10000
 
     @pytest.mark.asyncio
     async def test_search_memories_hybrid_within_limit_stays_hybrid(self):
@@ -1155,7 +1155,7 @@ class TestHybridSearch:
             mock_settings.hybrid_search_text_results_multiplier = 3
 
             # limit=50, offset=100 -> (50+100)*3 = 450, well within 10000
-            results = await db.search_memories(
+            await db.search_memories(
                 query="test query",
                 hybrid_search=True,
                 limit=50,
