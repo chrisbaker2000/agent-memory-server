@@ -17,6 +17,14 @@ os.environ["FAMILY_JSON_PATH"] = str(Path(__file__).parent / "fixtures" / "famil
 os.environ["VOCABULARY_PATH"] = str(
     Path(__file__).parent / "fixtures" / "memory-vocabulary.json"
 )
+# And Redis: the default settings.redis_url (redis://localhost:6379) is the LIVE
+# homelab Redis Stack holding production memories. Tests normally get a
+# testcontainer Redis (use_test_redis_connection patches settings.redis_url),
+# but when Docker is unavailable that fixture yields None and any code path that
+# still connects used the default: 109 tests reached the live server on
+# 2026-10-09 and only its password stopped them (test_memory_compaction calls
+# flushdb). A closed loopback port makes such paths fail fast instead.
+os.environ["REDIS_URL"] = "redis://127.0.0.1:1"
 from datetime import UTC, datetime
 from typing import Any
 from unittest import mock
