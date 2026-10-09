@@ -24,6 +24,7 @@ from agent_memory_server.models import (
     MemoryRecordResults,
     MemoryTypeEnum,
 )
+from agent_memory_server.utils.keys import Keys
 from agent_memory_server.utils.recency import generate_memory_hash
 
 
@@ -240,17 +241,21 @@ class TestLongTermMemory:
         to match langchain-redis TAG field format. Using comma separator causes
         search filters to fail with 500 errors.
         """
+        import fakeredis
+
+        # A real (fake) Redis with the memory present: the write is now the atomic
+        # update-if-present script, so assert the STORED values, not mock call args.
+        redis = fakeredis.FakeAsyncRedis(decode_responses=False)
+        await redis.hset(Keys.memory_key("test-id"), mapping={"text": "Test text content"})
         with (
             patch(
-                "agent_memory_server.long_term_memory.get_redis_conn"
-            ) as mock_get_redis,
+                "agent_memory_server.long_term_memory.get_redis_conn",
+                AsyncMock(return_value=redis),
+            ),
             patch(
                 "agent_memory_server.long_term_memory.handle_extraction"
             ) as mock_extract,
         ):
-            # Set up proper async mocks
-            mock_redis = AsyncMock()
-            mock_get_redis.return_value = mock_redis
             # Use controlled vocabulary topics — enforce_topics() filters unknowns
             mock_extract.return_value = (["family", "health"], ["Chris Baker", "Lindsey Baker"])
 
@@ -267,17 +272,11 @@ class TestLongTermMemory:
             # Verify extraction was called
             mock_extract.assert_called_once_with("Test text content")
 
-            # Verify Redis was updated with topics and entities
-            mock_redis.hset.assert_called_once()
-            args, kwargs = mock_redis.hset.call_args
-
-            # Check the key format - it includes the memory ID in the key structure
-            assert "memory_idx:" in args[0] and "test-id" in args[0]
-
-            # Check the mapping - must use pipe separator to match langchain-redis
-            mapping = kwargs["mapping"]
-            assert mapping["topics"] == "family|health"
-            assert mapping["entities"] == "Chris Baker|Lindsey Baker"
+            # Stored on the memory's hash, pipe-separated to match langchain-redis
+            stored = await redis.hgetall(Keys.memory_key("test-id"))
+            assert stored[b"topics"] == b"family|health"
+            assert stored[b"entities"] == b"Chris Baker|Lindsey Baker"
+            assert stored[b"text"] == b"Test text content"
 
     @pytest.mark.asyncio
     async def test_count_long_term_memories(self, mock_async_redis_client):
@@ -349,8 +348,9 @@ class TestLongTermMemory:
             total=1, memories=[existing_memory]
         )
 
-        # Mock the hset call that updates last_accessed
-        mock_async_redis_client.hset = AsyncMock()
+        # last_accessed is touched through the atomic update-if-present script (EVAL),
+        # which never recreates a memory deleted since the search.
+        mock_async_redis_client.eval = AsyncMock(return_value=1)
 
         with mock.patch(
             "agent_memory_server.long_term_memory.get_memory_vector_db",
@@ -364,8 +364,11 @@ class TestLongTermMemory:
         assert result_memory is None
         assert overwrite is True
 
-        # Verify that last_accessed was updated
-        mock_async_redis_client.hset.assert_called_once()
+        # Verify that last_accessed was updated on the existing memory's key
+        mock_async_redis_client.eval.assert_called_once()
+        args = mock_async_redis_client.eval.call_args.args
+        assert Keys.memory_key("existing-memory-id") in args
+        assert "last_accessed" in args
 
     @pytest.mark.asyncio
     async def test_merge_memories_with_llm(self):

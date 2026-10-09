@@ -185,6 +185,46 @@ Extracted memories:
 
 logger = logging.getLogger(__name__)
 
+# Atomic "update only while the memory still exists". HSET / HINCRBY on a missing key
+# CREATES it, so a background write racing a delete (topic/entity extraction, access
+# tracking, dedup touch) resurrected the memory as a partial "ghost" hash with no
+# text / source_user / visibility (reproduced 2026-10-09). A memory hash always has
+# `text`; one without it is not live and must not be fed either.
+# KEYS[1] = memory hash; ARGV[1] = field to HINCRBY by 1 ('' = none);
+# ARGV[2..] = field, value pairs to HSET. Returns 1 if written, 0 if skipped.
+_UPDATE_IF_PRESENT_LUA = """
+if redis.call('HEXISTS', KEYS[1], 'text') == 0 then return 0 end
+for i = 2, #ARGV, 2 do redis.call('HSET', KEYS[1], ARGV[i], ARGV[i + 1]) end
+if ARGV[1] ~= '' then redis.call('HINCRBY', KEYS[1], ARGV[1], 1) end
+return 1
+"""
+
+
+def _update_if_present_args(
+    fields: dict[str, str], incr_field: str | None
+) -> list[str]:
+    args = [incr_field or ""]
+    for name, value in fields.items():
+        args.extend([name, value])
+    return args
+
+
+async def update_memory_if_present(
+    redis: Redis,
+    key: str,
+    fields: dict[str, str],
+    incr_field: str | None = None,
+) -> bool:
+    """Atomically HSET `fields` (and HINCRBY `incr_field`) on a memory hash, but only if
+    the memory still exists (has `text`). Never creates the key.
+
+    Returns True if written, False if the memory is gone (deleted, or never stored).
+    """
+    result = await redis.eval(  # type: ignore[misc]
+        _UPDATE_IF_PRESENT_LUA, 1, key, *_update_if_present_args(fields, incr_field)
+    )
+    return int(result) == 1
+
 
 class MemoryExtractionError(Exception):
     """The extraction LLM call failed (exhausted retries, unparseable output, …).
@@ -766,10 +806,16 @@ async def extract_memory_structure(
     topics_joined = "|".join(merged_topics) if merged_topics else ""
     entities_joined = "|".join(merged_entities) if merged_entities else ""
 
-    await redis.hset(
+    written = await update_memory_if_present(
+        redis,
         Keys.memory_key(memory.id),
-        mapping={"topics": topics_joined, "entities": entities_joined},
-    )  # type: ignore
+        {"topics": topics_joined, "entities": entities_joined},
+    )
+    if not written:
+        logger.info(
+            "Skipped topic/entity write for memory %s: it was deleted before extraction finished",
+            memory.id,
+        )
 
 
 async def merge_memories_with_llm(
@@ -2318,10 +2364,20 @@ async def deduplicate_by_hash(
         if existing_memory.id:
             # Use the memory key format to update last_accessed
             existing_key = Keys.memory_key(existing_memory.id)
-            await redis_client.hset(
+            touched = await update_memory_if_present(
+                redis_client,
                 existing_key,
-                mapping={"last_accessed": str(int(datetime.now(UTC).timestamp()))},
-            )  # type: ignore
+                {"last_accessed": str(int(datetime.now(UTC).timestamp()))},
+            )
+            if not touched:
+                # The hit was deleted between the search and this touch: it is not a
+                # live duplicate. Index the new memory instead of dropping it, or the
+                # write would be lost with no copy left.
+                logger.info(
+                    "Hash-duplicate %s vanished before dedup; keeping the new memory",
+                    existing_memory.id,
+                )
+                return memory, False
 
             # Don't save this memory, it's a duplicate
             return None, True
@@ -3376,12 +3432,19 @@ async def update_last_accessed(
     if not to_update:
         return 0
 
+    # Batched, but each update is the atomic exists-check script: a search hit that was
+    # deleted meanwhile (HGET returned None, read as "never accessed") must not be
+    # recreated as a ghost. Only records actually written are counted.
     pipeline2 = redis.pipeline()
     for key, ts in to_update:
-        pipeline2.hset(key, mapping={"last_accessed": str(ts)})
-        pipeline2.hincrby(key, "access_count", 1)
-    await pipeline2.execute()
-    return len(to_update)
+        pipeline2.eval(  # type: ignore[misc]
+            _UPDATE_IF_PRESENT_LUA,
+            1,
+            key,
+            *_update_if_present_args({"last_accessed": str(ts)}, "access_count"),
+        )
+    results = await pipeline2.execute()
+    return sum(1 for r in results if int(r) == 1)
 
 
 async def forget_long_term_memories(
