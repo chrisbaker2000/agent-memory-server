@@ -1975,6 +1975,7 @@ async def search_long_term_memories(
     offset: int = 0,
     optimize_query: bool = False,
     bypass_recall_filters: bool = False,
+    egress_exempt: bool = False,
 ) -> MemoryRecordResults:
     """
     Search for long-term memories using the pluggable memory vector database.
@@ -1999,6 +2000,12 @@ async def search_long_term_memories(
         limit: Maximum number of results
         offset: Offset for pagination
         optimize_query: Whether to optimize the query for vector search using a fast model (default: False)
+        egress_exempt: Keep this call out of the recall egress window (and
+            change nothing else). Python-only, not on ``SearchRequest``, so it
+            is the server-trusted internal-call marker the egress guard
+            docstring asks for. Set by in-process full-corpus readers such as
+            SummaryView refreshes. Those fetched about 5.3K memories per run
+            and flagged the guard on every refresh (2026-10-10).
 
     Returns:
         MemoryRecordResults containing matching memories
@@ -2060,7 +2067,7 @@ async def search_long_term_memories(
             listing.total = len(listing.memories)
             listing.next_offset = None
         await _observe_recall_egress(
-            len(listing.memories), exempt=bypass_recall_filters
+            len(listing.memories), exempt=bypass_recall_filters or egress_exempt
         )
         return listing
 
@@ -2264,7 +2271,9 @@ async def search_long_term_memories(
     # gate + supersede hiding) into the global fixed-window counter. Detect-only.
     # bypass_recall_filters marks a trusted internal full-corpus enumeration
     # (curator backup, LAB-281) and exempts it from the shared window (LAB-388).
-    await _observe_recall_egress(len(results.memories), exempt=bypass_recall_filters)
+    await _observe_recall_egress(
+        len(results.memories), exempt=bypass_recall_filters or egress_exempt
+    )
 
     return results
 
