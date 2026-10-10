@@ -205,6 +205,12 @@ def _load_family_registry() -> tuple[dict[str, str], dict[str, str], str | None]
 
 
 _family_names, _family_identities, _family_admin_user = _load_family_registry()
+# Channels whose native DM peer ids are opaque numbers/phones/ids, never a
+# user-chosen name, so a name-shaped peer can only be the gateway's canonical
+# identityLinks key. Do not add handle-based channels (twitter, matrix, irc, …).
+CANONICAL_DM_CHANNELS: frozenset[str] = frozenset(
+    {"discord", "whatsapp", "slack", "signal"}
+)
 # Lowercased user id → registry user id, for canonical (identityLinks) DM keys.
 _family_user_ids: dict[str, str] = {uid.lower(): uid for uid in _family_names}
 
@@ -271,10 +277,16 @@ def resolve_user_from_session_id(session_id: str | None) -> str | None:
                 # family member is linked, so without this every family DM thread
                 # was extracted as "User" and the 'User' guard rejected its facts.
                 # Platform ids are checked first, so a registered platform id can
-                # never be shadowed by a user id.
-                canonical = _family_user_ids.get(peer_id)
-                if canonical:
-                    return canonical
+                # never be shadowed by a user id. Only channels whose native DM
+                # peer id can never be a bare name (snowflake, E.164, Slack U-id)
+                # qualify: on a handle-based channel an unlinked stranger whose
+                # handle equals a family user id would otherwise be attributed
+                # as that family member.
+                channel = parts[idx - 1] if idx >= 1 else ""
+                if channel in CANONICAL_DM_CHANNELS:
+                    canonical = _family_user_ids.get(peer_id)
+                    if canonical:
+                        return canonical
         except ValueError:
             continue
 

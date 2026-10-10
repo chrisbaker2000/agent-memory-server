@@ -73,7 +73,7 @@ def test_known_dm_peer_resolves_to_its_user(session_id, expected):
         ("agent:main:slack:dm:riley", "riley"),
         ("Agent:Main:Discord:Direct:Jordan", "jordan"),
         # A registered user with no platform identities at all.
-        ("agent:main:imessage:direct:casey", "casey"),
+        ("agent:main:signal:direct:casey", "casey"),
     ],
 )
 def test_canonical_identity_dm_key_resolves_to_that_user(session_id, expected):
@@ -87,6 +87,21 @@ def test_platform_id_wins_over_a_user_id_with_the_same_text(monkeypatch):
     # user who registered it, never to the same-named user.
     monkeypatch.setitem(ex._family_identities, "sam", "riley")
     assert resolve_user_from_session_id("agent:main:discord:direct:sam") == "riley"
+
+
+@pytest.mark.parametrize(
+    "session_id",
+    [
+        # Handle-based channels: an unlinked stranger's handle can equal a user id.
+        "agent:main:twitter:direct:sam",
+        "agent:main:matrix:dm:alex",
+        "agent:main:openai-user:direct:riley",
+        # Malformed: scope with no channel segment before it.
+        "direct:sam",
+    ],
+)
+def test_canonical_lookup_ignores_handle_based_channels(session_id):
+    assert resolve_user_from_session_id(session_id) is None
 
 
 def test_canonical_lookup_is_limited_to_dm_scopes():
