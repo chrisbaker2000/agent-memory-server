@@ -7,6 +7,7 @@ partitioned summary management so the API surface is wired end-to-end.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from collections.abc import Iterable
@@ -243,6 +244,30 @@ def _build_long_term_filters_for_view(
     return filters
 
 
+# Summary text stored when the summarization model returns nothing. A refresh
+# never lets this replace an earlier good summary (see refresh_summary_view).
+SUMMARY_FAILED_TEXT = "No summary could be generated for this partition."
+
+
+def _partition_fingerprint(memories: list[MemoryRecord]) -> str:
+    """Order-independent digest of a partition's summarization inputs.
+
+    Covers each memory's id, updated_at and a hash of its text, so an edit,
+    addition or deletion changes it while a re-fetch of the same set does not.
+    """
+    h = hashlib.sha256()
+    for mem_id, updated, text_hash in sorted(
+        (
+            m.id,
+            m.updated_at.isoformat() if m.updated_at else "",
+            hashlib.sha256((m.text or "").encode("utf-8")).hexdigest(),
+        )
+        for m in memories
+    ):
+        h.update(f"{mem_id}\x1f{updated}\x1f{text_hash}\x1e".encode())
+    return h.hexdigest()
+
+
 async def _fetch_long_term_memories_for_view(
     view: SummaryView,
     extra_group: dict[str, str] | None = None,
@@ -276,10 +301,13 @@ async def _fetch_long_term_memories_for_view(
         else:
             current_limit = page_size
 
+        # Internal full-partition enumeration, not a recall: keep it out of
+        # the egress window (each refresh reads the whole partition).
         results = await long_term_memory.search_long_term_memories(
             text="",
             limit=current_limit,
             offset=offset,
+            egress_exempt=True,
             **filters,
         )
         batch = list(results.memories)
@@ -487,7 +515,7 @@ async def summarize_partition_long_term(
                 view.id,
                 group,
             )
-            summary_text = "No summary could be generated for this partition."
+            summary_text = SUMMARY_FAILED_TEXT
         else:
             summary_text = content
 
@@ -497,6 +525,7 @@ async def summarize_partition_long_term(
         summary=summary_text,
         memory_count=len(memories),
         computed_at=datetime.now(UTC),
+        source_fingerprint=_partition_fingerprint(memories),
     )
 
 
@@ -593,11 +622,49 @@ async def refresh_summary_view(
                 )
 
             partitions = _partition_memories_by_group(view, memories)
+            previous = {
+                encode_partition_key(r.group): r
+                for r in await list_partition_results(view.id)
+            }
 
+            reused = 0
             for key, mems in partitions.items():
                 group = dict(key)
+                prior = previous.get(encode_partition_key(group))
+                # Why: callers trigger a refresh after every saved turn
+                # (openclaw-redis-agent-memory), about 400 runs per 2 days on
+                # 2026-10-10, each re-summarizing ~5.3K unchanged memories with
+                # an LLM call. Unchanged inputs keep the stored summary.
+                if (
+                    prior is not None
+                    and prior.source_fingerprint is not None
+                    and prior.source_fingerprint == _partition_fingerprint(mems)
+                    and prior.summary != SUMMARY_FAILED_TEXT
+                ):
+                    reused += 1
+                    continue
                 result = await summarize_partition_long_term(view, group, mems)
+                if (
+                    result.summary == SUMMARY_FAILED_TEXT
+                    and prior is not None
+                    and prior.summary != SUMMARY_FAILED_TEXT
+                ):
+                    # A transient model failure must not replace a good summary.
+                    # The old fingerprint stays, so the next refresh retries.
+                    logger.warning(
+                        "refresh_summary_view: summarization failed for view %s "
+                        "group %r; keeping the previous summary",
+                        view.id,
+                        group,
+                    )
+                    continue
                 await save_partition_result(result)
+            if reused:
+                logger.info(
+                    "refresh_summary_view: view %s reused %d unchanged partition(s)",
+                    view.id,
+                    reused,
+                )
         else:
             # For unsupported sources, we currently do nothing.
             logger.info(

@@ -1282,6 +1282,14 @@ class SummaryViewPartitionResult(BaseModel):
         default_factory=lambda: datetime.now(UTC),
         description="When this summary was computed",
     )
+    source_fingerprint: str | None = Field(
+        default=None,
+        description=(
+            "Digest of the partition's input memories (ids + updated_at + text "
+            "hash). A refresh whose inputs hash the same reuses this summary "
+            "instead of re-running the summarization model."
+        ),
+    )
 
 
 class CreateSummaryViewRequest(BaseModel):
