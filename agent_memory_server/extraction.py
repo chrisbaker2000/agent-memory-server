@@ -205,6 +205,8 @@ def _load_family_registry() -> tuple[dict[str, str], dict[str, str], str | None]
 
 
 _family_names, _family_identities, _family_admin_user = _load_family_registry()
+# Lowercased user id → registry user id, for canonical (identityLinks) DM keys.
+_family_user_ids: dict[str, str] = {uid.lower(): uid for uid in _family_names}
 
 
 def resolve_user_display_name(source_user: str | None) -> str:
@@ -263,6 +265,16 @@ def resolve_user_from_session_id(session_id: str | None) -> str | None:
                 stripped = peer_id.lstrip("+")
                 if stripped in _family_identities:
                     return _family_identities[stripped]
+                # Why: with `session.dmScope: per-channel-peer` + `identityLinks`
+                # the gateway keys a linked sender's DM by the canonical identity
+                # (`agent:main:discord:direct:chris`), not the platform id. Every
+                # family member is linked, so without this every family DM thread
+                # was extracted as "User" and the 'User' guard rejected its facts.
+                # Platform ids are checked first, so a registered platform id can
+                # never be shadowed by a user id.
+                canonical = _family_user_ids.get(peer_id)
+                if canonical:
+                    return canonical
         except ValueError:
             continue
 
