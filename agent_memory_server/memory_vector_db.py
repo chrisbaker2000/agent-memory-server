@@ -73,6 +73,37 @@ CONFIDENCE_UNSCORED_SENTINEL = 2.0
 # with a far-future valid_to_ts so a single range query covers the null case.
 VALID_TO_SENTINEL = 9_999_999_999.0
 
+# Recall weight. None/""/garbage reads as unscored. Bool is an int subclass and
+# must not become 1.
+IMPORTANCE_MIN = 1
+IMPORTANCE_MAX = 5
+
+
+def _parse_importance(raw: Any) -> int | None:
+    """Parse a stored importance score. Out of range or non-numeric → None.
+
+    A fractional float is rejected rather than truncated, so a corrupt hash
+    value cannot silently become a different rank.
+    """
+    if isinstance(raw, bool) or raw is None:
+        return None
+    if isinstance(raw, int):
+        value = raw
+    elif isinstance(raw, float):
+        if not raw.is_integer():
+            return None
+        value = int(raw)
+    elif isinstance(raw, str):
+        text = raw.strip()
+        if not text.isdigit():
+            return None
+        value = int(text)
+    else:
+        return None
+    if IMPORTANCE_MIN <= value <= IMPORTANCE_MAX:
+        return value
+    return None
+
 
 class MemoryVectorDatabase(ABC):
     """Abstract base class for memory vector database implementations.
@@ -368,6 +399,10 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         "source_channel",
         "visibility",
         "stale_after",
+        # Recall weight. Stored on the hash and returned even though it is not
+        # indexed (same pattern as trust_level), so search can rank by it
+        # without an index rebuild. Missing on legacy hashes → unscored.
+        "importance",
         # Provenance & versioning. Returned even when not indexed in the live
         # index (FT.SEARCH RETURN reads hash fields directly), so storage +
         # supersede-hiding work before a rebuild-index.
@@ -487,6 +522,11 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
             # Reference-record write protection (C1). Empty string = unset =
             # lowest ('agent') tier on read. Stored on the hash but not indexed.
             "trust_level": memory.trust_level or "",
+            # Always written so an update can clear a previous score (HSET
+            # merges; omitting the key would leave the old value). "" = unscored.
+            "importance": (
+                int(memory.importance) if memory.importance is not None else ""
+            ),
             # confidence_idx is ALWAYS written: the real score when scored, else
             # the above-range sentinel so unscored records pass any min floor.
             "confidence_idx": (
@@ -605,6 +645,7 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         # Reference-record write protection (C1). Empty string → None (= lowest
         # tier via content_trust.record_trust_level's fail-safe).
         trust_level = fields.get("trust_level") or None
+        importance = _parse_importance(fields.get("importance"))
         derived_from = self._parse_list_field(fields.get("derived_from")) or None
         # confidence: the unscored sentinel (>= 1.0) reads back as None (unscored),
         # never as a real score. A real score is in [0, 1].
@@ -649,6 +690,7 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
             valid_to=valid_to,
             superseded_by=superseded_by,
             trust_level=trust_level,
+            importance=importance,
             dist=score,
         )
 

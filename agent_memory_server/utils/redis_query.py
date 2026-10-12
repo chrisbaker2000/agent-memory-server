@@ -39,6 +39,10 @@ class RecencyAggregationQuery(AggregationQuery):
         "source_channel",
         "visibility",
         "stale_after",
+        # Not in the index schema. FT.AGGREGATE LOAD still reads it off the
+        # hash (Redis Stack 7.4 on this machine). Leaving it out made every
+        # server-side recency hit look unscored.
+        "importance",
         "text",
         "__vector_score",
     ]
