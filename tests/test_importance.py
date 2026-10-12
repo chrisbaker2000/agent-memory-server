@@ -70,13 +70,19 @@ def test_garbage_and_missing_read_as_unscored(raw: object):
 
 
 def test_importance_is_returned_but_not_indexed():
-    # FT.SEARCH RETURN reads the hash field. Indexing it would require a
-    # rebuild before any search that LOADs it, and recall only needs the value.
+    # FT.SEARCH RETURN and FT.AGGREGATE LOAD both read the hash field.
+    # It stays out of the schema so existing indexes do not need a rebuild.
     from agent_memory_server.memory_vector_db_factory import _build_redis_schema
 
     assert "importance" in RedisVLMemoryVectorDatabase.RETURN_FIELDS
     indexed = {field["name"] for field in _build_redis_schema()["fields"]}
     assert "importance" not in indexed
+
+
+def test_server_side_recency_returns_importance():
+    from agent_memory_server.utils.redis_query import RecencyAggregationQuery
+
+    assert "importance" in RecencyAggregationQuery.DEFAULT_RETURN_FIELDS
 
 
 async def test_update_persists_importance_alone():
