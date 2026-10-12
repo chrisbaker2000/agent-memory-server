@@ -3155,6 +3155,7 @@ async def update_long_term_memory(
         "source_channel",
         "visibility",
         "stale_after",
+        "importance",
         # Client-settable provenance (valid_to / superseded_by are server-managed
         # via supersede_memory, deliberately excluded here).
         "kind",

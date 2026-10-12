@@ -353,6 +353,19 @@ class MemoryRecord(BaseModel):
         default=None,
         description="Datetime after which this memory should be considered stale",
     )
+    importance: int | None = Field(
+        default=None,
+        ge=1,
+        le=5,
+        description=(
+            "Recall weight from 1 (trivial) to 5 (critical). None = unscored, "
+            "which recall treats as neutral (3). Store-and-return only: written "
+            "on the hash and returned by search, not a query filter, so existing "
+            "records stay valid without an index rebuild. The redis-memory plugin "
+            "applies it as a bounded rank nudge; the server recency rerank does "
+            "not, so the score is not counted twice."
+        ),
+    )
     # --- Provenance & versioning (ported from wfr-memory-commons / further-memory) ---
     kind: (
         Literal["fact", "event", "preference", "opinion", "belief", "summary"] | None
@@ -1099,6 +1112,12 @@ class EditMemoryRecordRequest(BaseModel):
     )
     stale_after: datetime | None = Field(
         default=None, description="Updated stale-after datetime for the memory"
+    )
+    importance: int | None = Field(
+        default=None,
+        ge=1,
+        le=5,
+        description="Updated recall weight, 1 (trivial) through 5 (critical)",
     )
     kind: (
         Literal["fact", "event", "preference", "opinion", "belief", "summary"] | None
