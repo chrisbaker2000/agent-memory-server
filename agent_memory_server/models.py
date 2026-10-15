@@ -426,6 +426,17 @@ class MemoryRecord(BaseModel):
             "needed. See utils/content_trust.py."
         ),
     )
+    importance: int | None = Field(
+        default=None,
+        ge=1,
+        le=5,
+        description=(
+            "Curator salience score, 1 (low) through 5 (high). Client-settable. "
+            "Stored on the hash and returned by FT.SEARCH, but NOT indexed — no "
+            "rebuild. None means unset. A hash value outside 1..5 reads back as "
+            "None so one corrupt field cannot fail the search."
+        ),
+    )
 
 
 class ExtractedMemoryRecord(MemoryRecord):
@@ -1114,6 +1125,12 @@ class EditMemoryRecordRequest(BaseModel):
     )
     valid_from: datetime | None = Field(
         default=None, description="Updated start of validity window"
+    )
+    importance: int | None = Field(
+        default=None,
+        ge=1,
+        le=5,
+        description="Updated curator salience score, 1 through 5",
     )
 
 

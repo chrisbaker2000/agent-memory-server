@@ -39,6 +39,7 @@ class RecencyAggregationQuery(AggregationQuery):
         "source_channel",
         "visibility",
         "stale_after",
+        "importance",
         "text",
         "__vector_score",
     ]

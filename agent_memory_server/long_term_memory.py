@@ -3162,6 +3162,8 @@ async def update_long_term_memory(
         "derived_from",
         "observed_at",
         "valid_from",
+        # Curator salience. Store-and-return; not indexed.
+        "importance",
     }
 
     # Validate update fields

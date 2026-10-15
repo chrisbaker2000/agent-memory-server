@@ -338,6 +338,35 @@ class MemoryVectorDatabase(ABC):
             return memory_results
 
 
+def parse_stored_importance(value: Any) -> int | None:
+    """Coerce a Redis hash value to a salience score in 1..5, else None.
+
+    Hashes come back as strings. Bool is an int subclass and is not a score.
+    Non-integers and values outside 1..5 are unset, so a bad field cannot
+    fail ``MemoryRecord`` validation for the rest of the row.
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return None
+        if not value.isdigit():
+            return None
+        number = int(value)
+    elif isinstance(value, int):
+        number = value
+    elif isinstance(value, float):
+        if not value.is_integer():
+            return None
+        number = int(value)
+    else:
+        return None
+    if 1 <= number <= 5:
+        return number
+    return None
+
+
 class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
     """Redis memory vector database implementation using RedisVL directly.
 
@@ -381,6 +410,9 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         # Reference-record write protection (C1). Returned from the hash even
         # though it is not indexed, so the mutation guard reads the stored tier.
         "trust_level",
+        # Curator salience. Same store-and-return rule as trust_level: the
+        # hash field round-trips without an index rebuild.
+        "importance",
     ]
 
     def __init__(self, index: AsyncSearchIndex, embeddings: Any):
@@ -524,6 +556,10 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         # the indexed valid_to_ts (with sentinel) is the query-side field.
         if valid_to_val is not None:
             data["valid_to"] = valid_to_val
+        # Omit when unset so a record that never had a score stays without
+        # the key. A later read of a real score writes it back on update.
+        if memory.importance is not None:
+            data["importance"] = memory.importance
 
         return data
 
@@ -605,6 +641,7 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
         # Reference-record write protection (C1). Empty string → None (= lowest
         # tier via content_trust.record_trust_level's fail-safe).
         trust_level = fields.get("trust_level") or None
+        importance = parse_stored_importance(fields.get("importance"))
         derived_from = self._parse_list_field(fields.get("derived_from")) or None
         # confidence: the unscored sentinel (>= 1.0) reads back as None (unscored),
         # never as a real score. A real score is in [0, 1].
@@ -649,6 +686,7 @@ class RedisVLMemoryVectorDatabase(MemoryVectorDatabase):
             valid_to=valid_to,
             superseded_by=superseded_by,
             trust_level=trust_level,
+            importance=importance,
             dist=score,
         )
 
