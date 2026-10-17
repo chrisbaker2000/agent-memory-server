@@ -163,6 +163,76 @@ async def test_record_and_check_increments_and_sets_ttl():
     assert calls[1][2] == _seconds_to_boundary(1000.0, 60)
 
 
+class _WindowRedis:
+    """Hash store that keeps a separate counter and TTL per window key."""
+
+    def __init__(self) -> None:
+        self.hashes: dict[str, dict[str, int]] = {}
+        self.ttls: dict[str, int] = {}
+
+    def pipeline(self) -> "_WindowPipeline":
+        return _WindowPipeline(self)
+
+
+class _WindowPipeline:
+    def __init__(self, redis: _WindowRedis) -> None:
+        self.redis = redis
+        self.ops: list[tuple] = []
+
+    def hincrby(self, key: str, field: str, amount: int) -> "_WindowPipeline":
+        self.ops.append(("hincrby", key, field, amount))
+        return self
+
+    def expire(self, key: str, ttl: int) -> "_WindowPipeline":
+        self.ops.append(("expire", key, ttl))
+        return self
+
+    async def execute(self) -> list[int | bool]:
+        results: list[int | bool] = []
+        for op in self.ops:
+            if op[0] == "hincrby":
+                _, key, field, amount = op
+                bucket = self.redis.hashes.setdefault(key, {})
+                bucket[field] = int(bucket.get(field, 0)) + int(amount)
+                results.append(bucket[field])
+            else:
+                _, key, ttl = op
+                self.redis.ttls[key] = int(ttl)
+                results.append(True)
+        return results
+
+
+@pytest.mark.asyncio
+async def test_adjacent_windows_do_not_share_a_counter():
+    """LAB-767: a new fixed window starts at this request, not at the previous cap.
+
+    A flag of ``2000 + this request`` is what one key that never expires would
+    report after the window has sat on the cap. Calls on either side of a
+    bucket boundary must use different keys, and each key's TTL stays within
+    the window plus the one-second grace.
+    """
+    redis = _WindowRedis()
+    cfg = _cfg(window_seconds=60, max_records=2000)
+    end_of_window = 1019.0  # bucket 16
+    start_of_next = 1020.0  # bucket 17
+
+    first = await record_and_check(redis, 2000, config=cfg, now=end_of_window)
+    second = await record_and_check(redis, 37, config=cfg, now=start_of_next)
+
+    assert first.outcome == "ok"
+    assert first.window_total == 2000
+    assert second.outcome == "ok"
+    assert second.window_total == 37
+    assert second.this_request == 37
+    assert set(redis.hashes) == {
+        "memory_egress:window:16",
+        "memory_egress:window:17",
+    }
+    assert redis.hashes["memory_egress:window:17"]["records"] == 37
+    assert redis.ttls["memory_egress:window:16"] == _seconds_to_boundary(end_of_window, 60)
+    assert 1 <= redis.ttls["memory_egress:window:17"] <= 61
+
+
 @pytest.mark.asyncio
 async def test_record_and_check_flags_when_window_exceeds_cap():
     # The post-increment window total (from HINCRBY) is what's compared, so a
