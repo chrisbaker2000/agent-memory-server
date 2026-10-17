@@ -955,7 +955,11 @@ async def set_working_memory(
                 if message_dict.get("id") is None:
                     message_dict.pop("id", None)
                 message_dict["persisted_at"] = None
-                processed_message = MemoryMessage(**message_dict)
+                # LAB-538: a dict with no created_at warns and gets a hidden
+                # "now". Backfill so the timestamp is explicit.
+                processed_message = working_memory_core.memory_message_from_dict(
+                    message_dict, datetime.now(UTC).isoformat()
+                )
 
             processed_messages.append(processed_message)
 

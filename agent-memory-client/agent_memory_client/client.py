@@ -57,6 +57,32 @@ from .models import (
 )
 from .tool_schema import ToolSchema, ToolSchemaCollection
 
+def coerce_working_message(msg: dict[str, Any] | MemoryMessage) -> MemoryMessage:
+    """Turn a caller message into a MemoryMessage without dropping ``created_at``.
+
+    LAB-538: dicts that already carry the channel timestamp must keep it. A
+    missing timestamp still constructs (the model defaults to now and warns);
+    an explicit one is forwarded so the server stores the real message time.
+    """
+    if isinstance(msg, MemoryMessage):
+        return msg
+    if not isinstance(msg, dict):
+        raise ValueError("All messages must be dictionaries or MemoryMessage objects")
+    if "role" not in msg or "content" not in msg:
+        raise ValueError("All messages must have 'role' and 'content' keys")
+    message_kwargs: dict[str, Any] = {
+        "role": msg["role"],
+        "content": msg["content"],
+    }
+    if msg.get("id") is not None:
+        message_kwargs["id"] = msg["id"]
+    if msg.get("persisted_at") is not None:
+        message_kwargs["persisted_at"] = msg["persisted_at"]
+    if msg.get("created_at") is not None:
+        message_kwargs["created_at"] = msg["created_at"]
+    return MemoryMessage(**message_kwargs)
+
+
 # === Tool Name Constants ===
 
 # Current tool names
@@ -3174,29 +3200,7 @@ class MemoryAPIClient:
             session_id=session_id, namespace=namespace, user_id=user_id
         )
 
-        # Convert messages to MemoryMessage objects
-        converted_messages = []
-        for msg in messages:
-            if isinstance(msg, MemoryMessage):
-                converted_messages.append(msg)
-            elif isinstance(msg, dict):
-                if "role" not in msg or "content" not in msg:
-                    raise ValueError("All messages must have 'role' and 'content' keys")
-                # Build message kwargs, only including non-None values
-                message_kwargs = {
-                    "role": msg["role"],
-                    "content": msg["content"],
-                }
-                if msg.get("id") is not None:
-                    message_kwargs["id"] = msg["id"]
-                if msg.get("persisted_at") is not None:
-                    message_kwargs["persisted_at"] = msg["persisted_at"]
-
-                converted_messages.append(MemoryMessage(**message_kwargs))
-            else:
-                raise ValueError(
-                    "All messages must be dictionaries or MemoryMessage objects"
-                )
+        converted_messages = [coerce_working_message(msg) for msg in messages]
 
         # Get existing messages
         existing_messages = []
