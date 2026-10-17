@@ -57,6 +57,7 @@ from .models import (
 )
 from .tool_schema import ToolSchema, ToolSchemaCollection
 
+
 def coerce_working_message(msg: dict[str, Any] | MemoryMessage) -> MemoryMessage:
     """Turn a caller message into a MemoryMessage without dropping ``created_at``.
 
