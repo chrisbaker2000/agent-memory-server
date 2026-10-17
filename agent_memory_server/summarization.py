@@ -1,6 +1,6 @@
 import json
 import logging
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import tiktoken
 from docket import Timeout
@@ -8,7 +8,7 @@ from redis import WatchError
 
 from agent_memory_server.config import settings
 from agent_memory_server.llm import LLMClient, get_model_config
-from agent_memory_server.models import MemoryMessage
+from agent_memory_server.working_memory import memory_message_from_dict
 from agent_memory_server.utils.keys import Keys
 from agent_memory_server.utils.redis import get_redis_conn
 
@@ -108,7 +108,13 @@ async def summarize_session(
                     if isinstance(msg_raw, bytes):
                         msg_raw = msg_raw.decode("utf-8")
                     msg_dict = json.loads(msg_raw)
-                    messages.append(MemoryMessage(**msg_dict))
+                    # LAB-538: legacy list entries omit created_at. Backfill
+                    # before validation so reconstruction does not warn.
+                    messages.append(
+                        memory_message_from_dict(
+                            msg_dict, datetime.now(UTC).isoformat()
+                        )
+                    )
 
                 logger.debug(f"[summarization] Messages: {messages}")
 

@@ -28,6 +28,23 @@ MIGRATION_STATUS_KEY = "working_memory:migration:complete"
 MIGRATION_REMAINING_KEY = "working_memory:migration:remaining"
 
 
+def memory_message_from_dict(message_data: Any, default_created_at: Any) -> MemoryMessage:
+    """Build a MemoryMessage, backfilling ``created_at`` when the stored dict omitted it.
+
+    LAB-538: summarization and the MCP put path reconstruct messages with
+    ``MemoryMessage(**dict)``. A dict that predates the field (or a caller that
+    still omits it) trips the model validator warning and stamps recency with
+    "now" only as a hidden default. Backfill first so the timestamp is explicit
+    and the warning does not fire. An existing ``created_at`` is kept.
+    """
+    filled = backfill_message_created_at(message_data, default_created_at)
+    if not isinstance(filled, dict):
+        raise TypeError(
+            f"memory message must be a dict, got {type(message_data).__name__}"
+        )
+    return MemoryMessage(**filled)
+
+
 def backfill_message_created_at(message_data: Any, default: Any) -> Any:
     """Return ``message_data`` with ``created_at`` populated when it is missing.
 
@@ -441,8 +458,8 @@ async def get_working_memory(
         )
         messages = []
         for message_data in working_memory_data.get("messages", []):
-            message = MemoryMessage(
-                **backfill_message_created_at(message_data, message_created_at_default)
+            message = memory_message_from_dict(
+                message_data, message_created_at_default
             )
             messages.append(message)
 

@@ -10,7 +10,10 @@ messages that already carry a real created_at.
 from datetime import UTC, datetime
 
 from agent_memory_server.models import MemoryMessage
-from agent_memory_server.working_memory import backfill_message_created_at
+from agent_memory_server.working_memory import (
+    backfill_message_created_at,
+    memory_message_from_dict,
+)
 
 
 DEFAULT = "2026-01-01T00:00:00+00:00"
@@ -48,6 +51,39 @@ def test_does_not_mutate_input_dict():
 def test_passes_through_non_dict_unchanged():
     assert backfill_message_created_at(None, DEFAULT) is None
     assert backfill_message_created_at("not-a-dict", DEFAULT) == "not-a-dict"
+
+
+def test_memory_message_from_dict_backfills_and_does_not_warn(caplog):
+    """Summarization and MCP reconstruct stored dicts through this helper."""
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        msg = memory_message_from_dict(
+            {"id": "legacy-1", "role": "user", "content": "legacy"},
+            DEFAULT,
+        )
+    assert msg.created_at.isoformat() == "2026-01-01T00:00:00+00:00"
+    assert not any("created_at" in rec.message for rec in caplog.records)
+
+
+def test_memory_message_from_dict_keeps_an_explicit_timestamp(caplog):
+    import logging
+
+    real = "2026-10-16T20:40:06+00:00"
+    with caplog.at_level(logging.WARNING):
+        msg = memory_message_from_dict(
+            {"role": "assistant", "content": "ok", "created_at": real},
+            DEFAULT,
+        )
+    assert msg.created_at.isoformat() == "2026-10-16T20:40:06+00:00"
+    assert not any("created_at" in rec.message for rec in caplog.records)
+
+
+def test_memory_message_from_dict_rejects_non_dict():
+    import pytest
+
+    with pytest.raises(TypeError, match="must be a dict"):
+        memory_message_from_dict("nope", DEFAULT)
 
 
 def test_backfilled_message_constructs_without_warning(caplog):
